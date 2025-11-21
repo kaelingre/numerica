@@ -1,10 +1,14 @@
 [package]
 name = "numerica"
 authors = ["Ben Ruijl <ben@symbolica.io>"]
-version = "1.0.0"
+keywords = ["algebra", "mathematics", "integer", "float", "rational"]
+version = "1.0.1"
 edition = "2024"
 license = "MIT"
 description = "Open-source math library for exact and floating point computations"
+readme = "Readme.md"
+repository = "https://github.com/symbolica-dev/numerica"
+rust-version = "1.88"
 
 [features]
 # import/export objects that do not depend on the state using serde
