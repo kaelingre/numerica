@@ -3,9 +3,11 @@
 //! # Example
 //!
 //! ```rust
-//! use spired::util::MathematicaFormat;
-//! use spired::sparse::{SparseMatrix};
-//! use symbolica::domains::integer::{IntegerRing, Integer};
+//! use numerica::tensors::sparse::{SparseMatrix};
+//! use numerica::domains::{
+//! 	integer::{IntegerRing, Integer},
+//!     rational::{FractionField}
+//! };
 //! let r = IntegerRing::new();
 //!
 //! let mat = SparseMatrix::from_csr(2,3,vec![Integer::new(10),Integer::new(7),Integer::new(13)],vec![0,2,3],vec![0,2,1],r);
@@ -169,9 +171,8 @@ impl<F: Ring> SparseMatrix<F> {
     ///
     /// # Example
     /// ```rust
-    /// use spired::util::MathematicaFormat;
-    /// use spired::sparse::{SparseMatrix};
-    /// use symbolica::domains::integer::{IntegerRing, Integer};
+    /// use numerica::tensors::sparse::{SparseMatrix};
+    /// use numerica::domains::integer::{IntegerRing, Integer};
     /// let r = IntegerRing::new();
     ///
     /// let mat = SparseMatrix::from_csr(2,3,vec![Integer::new(10),Integer::new(7),Integer::new(13)],vec![0,2,3],vec![0,2,1],r);
@@ -231,13 +232,13 @@ pub enum GpluLMode {
     None
 }
 
-/// Performs an LU decomposition on a sparse matrix.
+/// Performs an (GP)LU decomposition on a sparse matrix.
 ///
-/// I.e. for a given matrix A we compute L*U = P*A, where U is upper triangular, L is lower triangular and P is a permutation matrix,
-/// meaning U is the RREF of A up to permutations of rows.
+/// I.e. for a given matrix A we compute L*U = A, where U is upper triangular up to row permutations and L is lower triangular.
 /// One may submit a whole system and run the reduction, but one may also choose to submit row by row which is the immediately process
-/// according to the GPLU algorithm.
+/// according to the GPLU algorithm, see [https://www-almasty.lip6.fr/~bouillaguet/static/publis/CASC16.pdf].
 /// The algorithm is adapted from the SpaSM library, it is essentially the function spasm_LU in commit 965089a of SpaSM.
+/// After the LU decomposition, a backsubstitution can be applied to U in order to obtain a RREF form of A (with reversed row ordering).
 ///
 /// # Type parameters
 /// * `F` - the field of the matrix entries
@@ -286,7 +287,7 @@ pub struct Gplu<F: Field> {
 }
 
 impl<F: Field> Gplu<F> {
-    /// Construct a new row-by-row Gplu reducer with the given mode for the L matrix
+    /// Construct a new row-by-row Gplu decomposer.
     ///
     /// A new row can be added with `add_row()`.
     pub fn new(ncols : u32, field: F, mode: GpluLMode) -> Gplu<F> {
@@ -306,6 +307,38 @@ impl<F: Field> Gplu<F> {
             pstack : vec![0; ncols as usize],
             marks : vec![false; ncols as usize],
         }
+    }
+
+    /// Construct a new Gplu decomposer that immediately decomposes the given matrix.
+    ///
+    /// More rows can still be added with `add_row()`.
+    pub fn from_matrix(mat : SparseMatrix<F>, mode: GpluLMode) -> Gplu<F> {
+        let mut ret = Gplu {
+            u: SparseMatrix::new(0, mat.ncols(), mat.field().clone()),
+            x : vec![mat.field().zero(); mat.ncols() as usize],
+            l: match mode {
+                GpluLMode::Full | GpluLMode::Pattern => SparseMatrix::new(0, mat.ncols(), mat.field().clone()),
+                GpluLMode::None => SparseMatrix::new(0, 0, mat.field().clone())
+            },
+            pivots : vec![None; mat.ncols() as usize],
+            pivot_cols : Vec::new(),
+            mode : mode,
+            defficiency : 0,
+            xj : vec![0; mat.ncols() as usize],
+            pstack : vec![0; mat.ncols() as usize],
+            marks : vec![false; mat.ncols() as usize],
+            mat: mat,
+        };
+        for row in 0..ret.mat.nrows() {
+            ret.gplu_row(row);
+        }
+
+        ret
+    }
+
+    /// Return the original matrix that is to be decomposed
+    pub fn mat(&self) -> &SparseMatrix<F> {
+        &self.mat
     }
 
     /// Return the U matrix
@@ -388,6 +421,25 @@ impl<F: Field> Gplu<F> {
         self.pstack.fill(0);
         self.marks.resize(self.mat.ncols() as usize, false);
         self.marks.fill(false);
+    }
+
+    /// Applies backsubstitution to the U matrix to bring it into RREF form with reversed row ordering.
+    pub fn backsubstitute(&self) -> SparseMatrix<F> {
+        //idea: we construct a new Gplu system and add rows from U to it, starting with the one that has the pivot furthest to the right
+        let mut gplu = Gplu::new(self.u.ncols(), self.u.field.clone(), GpluLMode::None);
+        //gplu.u.values.reserve(self.u.values.len()); //TODO: should we reserve here?
+        //gplu.u.col_idcs.reserve(self.u.col_idcs.len()); //TODO: should we reserve here?
+        //gplu.u.row_idcs.reserve(self.u.row_idcs.len()); //TODO: should we reserve here?
+
+        //iterate over the rows starting from the one with pivot to the furthest right
+        for row in self.pivots.iter().rev().flatten() {
+            //prepare the vectors for add_row
+            let values = self.u.values[self.u.row_idcs[*row as usize]..self.u.row_idcs[(row + 1) as usize]].to_vec();
+            let col_idcs = self.u.col_idcs[self.u.row_idcs[*row as usize]..self.u.row_idcs[(row + 1) as usize]].to_vec();
+            gplu.add_row(values, col_idcs);
+        }
+
+        gplu.u
     }
 
     /// Apply the GPLU algorithm to the given row
@@ -697,5 +749,125 @@ impl<F: Field> Gplu<F> {
             
         }
         top
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use crate::domains::{
+        integer::{IntegerRing, Integer},
+        rational::{FractionField, Fraction}
+    };
+
+    use crate::tensors::sparse::{SparseMatrix, Gplu, GpluLMode};
+
+    #[test]
+    fn row_by_row_gplu() {
+        let r = IntegerRing::new();
+        let f = FractionField::new(r);
+
+        let mut gplu = Gplu::new(6, f.clone(), GpluLMode::None);
+
+        {
+	        let mut values : Vec<Fraction<IntegerRing> > = Vec::new();
+    	    let mut col_idcs : Vec<u32> = Vec::new();
+
+        	values.push(f.to_element(Integer::new(3),Integer::new(1),false));
+            col_idcs.push(1);
+            values.push(f.to_element(Integer::new(7),Integer::new(1),false));
+            col_idcs.push(2);
+            values.push(f.to_element(Integer::new(13),Integer::new(1),false));
+            col_idcs.push(5);
+
+            gplu.add_row(values, col_idcs);
+        }
+
+        {
+	        let mut values : Vec<Fraction<IntegerRing> > = Vec::new();
+    	    let mut col_idcs : Vec<u32> = Vec::new();
+
+        	values.push(f.to_element(Integer::new(-2),Integer::new(1),false));
+            col_idcs.push(0);
+            values.push(f.to_element(Integer::new(14),Integer::new(1),false));
+            col_idcs.push(3);
+            values.push(f.to_element(Integer::new(-27),Integer::new(1),false));
+            col_idcs.push(4);
+
+            gplu.add_row(values, col_idcs);
+        }
+
+        {
+	        let mut values : Vec<Fraction<IntegerRing> > = Vec::new();
+    	    let mut col_idcs : Vec<u32> = Vec::new();
+
+        	values.push(f.to_element(Integer::new(23),Integer::new(1),false));
+            col_idcs.push(1);
+            values.push(f.to_element(Integer::new(18),Integer::new(1),false));
+            col_idcs.push(2);
+            values.push(f.to_element(Integer::new(6),Integer::new(1),false));
+            col_idcs.push(4);
+
+            gplu.add_row(values, col_idcs);
+        }
+
+        assert_eq!(gplu.u().fmt_mma(), "{{{1,2}->1,{1,3}->7/3,{1,6}->13/3,{2,1}->1,{2,4}->-7,{2,5}->27/2,{3,3}->1,{3,5}->-18/107,{3,6}->299/107},{3,6}}");
+        assert_eq!(gplu.backsubstitute().fmt_mma(), "{{{1,3}->1,{1,5}->-18/107,{1,6}->299/107,{2,2}->1,{2,6}->-234/107,{2,5}->42/107,{3,1}->1,{3,4}->-7,{3,5}->27/2},{3,6}}");
+    }
+
+    #[test]
+    fn all_at_once_gplu() {
+        let r = IntegerRing::new();
+        let f = FractionField::new(r);
+
+        let mut mat = SparseMatrix::new(0, 6, f.clone());
+
+
+        {
+	        let mut values : Vec<Fraction<IntegerRing> > = Vec::new();
+    	    let mut col_idcs : Vec<u32> = Vec::new();
+
+        	values.push(f.to_element(Integer::new(3),Integer::new(1),false));
+            col_idcs.push(1);
+            values.push(f.to_element(Integer::new(7),Integer::new(1),false));
+            col_idcs.push(2);
+            values.push(f.to_element(Integer::new(13),Integer::new(1),false));
+            col_idcs.push(5);
+
+            mat.add_row(values, col_idcs);
+        }
+
+        {
+	        let mut values : Vec<Fraction<IntegerRing> > = Vec::new();
+    	    let mut col_idcs : Vec<u32> = Vec::new();
+
+        	values.push(f.to_element(Integer::new(-2),Integer::new(1),false));
+            col_idcs.push(0);
+            values.push(f.to_element(Integer::new(14),Integer::new(1),false));
+            col_idcs.push(3);
+            values.push(f.to_element(Integer::new(-27),Integer::new(1),false));
+            col_idcs.push(4);
+
+            mat.add_row(values, col_idcs);
+        }
+
+        {
+	        let mut values : Vec<Fraction<IntegerRing> > = Vec::new();
+    	    let mut col_idcs : Vec<u32> = Vec::new();
+
+        	values.push(f.to_element(Integer::new(23),Integer::new(1),false));
+            col_idcs.push(1);
+            values.push(f.to_element(Integer::new(18),Integer::new(1),false));
+            col_idcs.push(2);
+            values.push(f.to_element(Integer::new(6),Integer::new(1),false));
+            col_idcs.push(4);
+
+            mat.add_row(values, col_idcs);
+        }
+
+        let gplu = Gplu::from_matrix(mat, GpluLMode::None);
+
+        assert_eq!(gplu.u().fmt_mma(), "{{{1,2}->1,{1,3}->7/3,{1,6}->13/3,{2,1}->1,{2,4}->-7,{2,5}->27/2,{3,3}->1,{3,5}->-18/107,{3,6}->299/107},{3,6}}");
+        assert_eq!(gplu.backsubstitute().fmt_mma(), "{{{1,3}->1,{1,5}->-18/107,{1,6}->299/107,{2,2}->1,{2,6}->-234/107,{2,5}->42/107,{3,1}->1,{3,4}->-7,{3,5}->27/2},{3,6}}");
     }
 }
