@@ -149,6 +149,48 @@ impl<F: Ring> SparseMatrix<F> {
         }
     }
 
+    /// Return the number of non-zero entries in the given row.
+    pub fn row_weight(&self, row : u32) -> u32 {
+        (self.row_idcs[(row + 1) as usize] - self.row_idcs[row as usize]) as u32
+    }
+
+    /// Computes x = x + beta * self[row] for a dense vector x
+    /// Helper function for gplu.
+    pub fn scatter(&self, row : u32, beta : &F::Element, x : &mut Vec<F::Element>) {
+        for px in self.row_idcs[row as usize]..self.row_idcs[(row + 1) as usize] {
+            let j = self.col_idcs[px as usize];
+            x[j as usize] = self.field.add(&self.field.mul(beta, &self.values[px]), &x[j as usize])
+        }
+    }
+
+    /// Format in Mathematica format
+    ///
+    /// Simply apply `SparseArray@@` to the output in MMA.
+    ///
+    /// # Example
+    /// ```rust
+    /// use spired::util::MathematicaFormat;
+    /// use spired::sparse::{SparseMatrix};
+    /// use symbolica::domains::integer::{IntegerRing, Integer};
+    /// let r = IntegerRing::new();
+    ///
+    /// let mat = SparseMatrix::from_csr(2,3,vec![Integer::new(10),Integer::new(7),Integer::new(13)],vec![0,2,3],vec![0,2,1],r);
+    /// assert_eq!(mat.fmt_mma(), "{{{1,1}->10,{1,3}->7,{2,2}->13},{2,3}}");
+    ///  ```
+    pub fn fmt_mma(&self) -> String {
+        let vals = self.row_idcs.windows(2).enumerate() //iterate over rows (with index)
+            .flat_map(|(idx, pair)| { //iterate over row entries
+                (pair[0]..pair[1]).map(move |i| {
+                    //format each element as {idx,col}->val
+                    let val = RingPrinter::new(&self.field, &self.values[i]);
+                    format!("{{{},{}}}->{}", idx + 1, self.col_idcs[i] + 1, val)
+                })
+            })
+            .join(",");
+        //format as {vals, {nrows, ncols}}
+        format!("{{{{{}}},{{{},{}}}}}", vals, self.nrows, self.ncols)
+    }
+
     /// Erase zeroes from the values vector.
     fn erase_zeroes(&mut self) -> () {
         let mut pos : usize = 0;
@@ -175,34 +217,6 @@ impl<F: Ring> SparseMatrix<F> {
         //shrink the vector to their actual values
         self.values.truncate(pos);
         self.col_idcs.truncate(pos);
-    }
-
-    /// Format in Mathematica format
-    ///
-    /// Simply apply `SparseArray@@` to the output in MMA.
-    ///
-    /// # Example
-    /// ```rust
-    /// use spired::util::MathematicaFormat;
-    /// use spired::sparse::{SparseMatrix};
-    /// use symbolica::domains::integer::{IntegerRing, Integer};
-    /// let r = IntegerRing::new();
-    ///
-    /// let mat = SparseMatrix::from_csr(2,3,vec![Integer::new(10),Integer::new(7),Integer::new(13)],vec![0,2,3],vec![0,2,1],r);
-    /// assert_eq!(mat.fmt_mma(), "{{{1,1}->10,{1,3}->7,{2,2}->13},{2,3}}");
-    ///  ```
-    fn fmt_mma(&self) -> String {
-        let vals = self.row_idcs.windows(2).enumerate() //iterate over rows (with index)
-            .flat_map(|(idx, pair)| { //iterate over row entries
-                (pair[0]..pair[1]).map(move |i| {
-                    //format each element as {idx,col}->val
-                    let val = RingPrinter::new(&self.field, &self.values[i]);
-                    format!("{{{},{}}}->{}", idx + 1, self.col_idcs[i] + 1, val)
-                })
-            })
-            .join(",");
-        //format as {vals, {nrows, ncols}}
-        format!("{{{{{}}},{{{},{}}}}}", vals, self.nrows, self.ncols)
     }
 }
 
@@ -252,9 +266,23 @@ pub struct Gplu<F: Field> {
     /// Internal variable for spasm's GPLU algorithm used to check for early abort
     defficiency : u32,
 
-    /// Internal variable for spasm's GPLU algorithm
+    /// Internal variable for spasm's GPLU algorithm, stores the result of the forward solve step
+    /// It has length mat.ncols
     x : Vec<F::Element>,
-    
+
+    /// Internal variable for spasm's GPLU algorithm, stores the pattern of the forward solution.
+    /// It has length mat.ncols
+    xj : Vec<u32>,
+
+    /// Internal variables for spasm's GPLU algorithm, used to count the neighbors already traversed in reach()/dfs().
+    /// In spasm, this is part of the xj vector.
+    /// It has length mat.ncols
+    pstack : Vec<u32>,
+
+    /// Internal variables for spasm's GPLU algorithm, indicates which columns have been seen already in reach()/dfs()
+    /// In spasm, this is part of the xj vector.
+    /// It has length mat.ncols
+    marks : Vec<bool>,
 }
 
 impl<F: Field> Gplu<F> {
@@ -265,7 +293,7 @@ impl<F: Field> Gplu<F> {
         Gplu {
             mat: SparseMatrix::new(0, ncols, field.clone()),
             u: SparseMatrix::new(0, ncols, field.clone()),
-            x : vec![field.zero() ; ncols as usize],
+            x : vec![field.zero(); ncols as usize],
             l: match mode {
                 GpluLMode::Full | GpluLMode::Pattern => SparseMatrix::new(0, ncols, field),
                 GpluLMode::None => SparseMatrix::new(0, 0, field)
@@ -274,6 +302,9 @@ impl<F: Field> Gplu<F> {
             pivot_cols : Vec::new(),
             mode : mode,
             defficiency : 0,
+            xj : vec![0; ncols as usize],
+            pstack : vec![0; ncols as usize],
+            marks : vec![false; ncols as usize],
         }
     }
 
@@ -289,6 +320,7 @@ impl<F: Field> Gplu<F> {
 
     /// Adds a new row to the system and processes it in the next GPLU step
     ///
+    /// A GPLU step is essentially the forward solving of the whole system added until now.
     /// # Parameters
     /// * `values` - the values of the non-zero entries of the row
     /// * `col_idcs` - the column indices of the non-zero entries of the row
@@ -348,12 +380,20 @@ impl<F: Field> Gplu<F> {
 
         //update x
         self.x.resize(self.mat.ncols() as usize, self.mat.field().zero());
+
+        //update xj, pstack, marks (make them all zero)
+        self.xj.resize(self.mat.ncols() as usize, 0);
+        self.xj.fill(0);
+        self.pstack.resize(self.mat.ncols() as usize, 0);
+        self.pstack.fill(0);
+        self.marks.resize(self.mat.ncols() as usize, false);
+        self.marks.fill(false);
     }
 
     /// Apply the GPLU algorithm to the given row
     ///
     /// # Return
-    /// The pivot column of the new row in U if it was a linearly independet row.
+    /// The pivot column of the new row in U if it was a linearly independent row.
     fn gplu_row(&mut self, row : u32) -> Option<u32> {
         if row - self.defficiency == std::cmp::min(self.mat.ncols(), self.mat.nrows()) {
             //full rank reached
@@ -363,7 +403,6 @@ impl<F: Field> Gplu<F> {
         let row_idcs = &self.mat.row_idcs;
         let col_idcs = &self.mat.col_idcs;
         let values = &self.mat.values;
-        let field = &self.mat.field;
 
         //check whether the row can be taken directly into U
         let mut directly_pivotal = row_idcs[(row + 1) as usize] > row_idcs[row as usize]; //empty row check
@@ -384,16 +423,279 @@ impl<F: Field> Gplu<F> {
             self.pivot_cols.push(pivot_col);
 
             //copy the whole row into U (and divide by leading coefficient)
-            let leading_coeff_inv = field.inv(&values[row_idcs[row as usize]]);
+            let leading_coeff_inv = self.mat.field.inv(&values[row_idcs[row as usize]]);
             self.u.nrows += 1;
-            self.u.row_idcs.push(self.u.row_idcs.last().unwrap());
-            let row_idcs_last = self.u.row_idcs.last_mut().unwrap();
+            let start = row_idcs[row as usize];
+            let end = row_idcs[(row + 1) as usize];
+            self.u.row_idcs.push(self.u.row_idcs.last().unwrap() + (end - start));
+            self.u.col_idcs.extend_from_slice(&col_idcs[start..end]);
+            if self.mat.field.is_one(&leading_coeff_inv) {
+	            self.u.values.extend_from_slice(&values[start..end]);
+            } else {
+                self.u.values.extend(values[start..end].iter().map(|val| self.mat.field.mul(val, &leading_coeff_inv)));
+            }
 
-            
+            //also compute L if wanted
+            match self.mode {
+                GpluLMode::Full => {
+                    //put a 1 on the diagonal
+                    self.l.col_idcs.push(row - self.defficiency);
+                    self.l.values.push(self.mat.field.one());
+                    //finish the row
+                    self.l.row_idcs.push(self.l.col_idcs.len());
+                    //update nrows/ncols
+                    self.l.nrows += 1;
+                    self.l.ncols += 1;
+                },
+                GpluLMode::Pattern => {
+                    //put an entry on the diagonal
+                    self.l.col_idcs.push(row - self.defficiency);
+                    //finish the row
+                    self.l.row_idcs.push(self.l.col_idcs.len());
+                    //update nrows/ncols
+                    self.l.nrows += 1;
+                    self.l.ncols += 1;
+                },
+                GpluLMode::None => ()//nothing to be done
+            }
+            return Some(pivot_col);
         }
 
-        
+        //triangular solve: x * U = mat[row]
+        let top = self.sparse_forward_solve(row);
+
+        //find pivot and dispatch coeffs into U
+        let mut pivot : Option<u32> = None;
+        for px in top..self.mat.ncols() {
+            //x[j] is generically nonzero
+            let j = self.xj[px as usize];
+
+            //if x[j] == 0 (accidental cancellation) we just ignore it
+            if self.mat.field.is_zero(&self.x[j as usize]) {
+                continue;
+            }
+            if self.pivots[j as usize].is_none() {
+                //column is not yet pivotal
+                //better than current pivot
+                if pivot.map_or(true, |jj| j < jj) {
+                    pivot = Some(j);
+                }
+            } else {
+                //self.l.row_idcs will be updated later
+                match self.mode {
+                    GpluLMode::Full => {
+                        // x[j] is the entry L[i, pivots[j] ]
+                        self.l.col_idcs.push(self.pivots[j as usize].unwrap());
+                        self.l.values.push(self.x[j as usize].clone());
+                    },
+                    GpluLMode::Pattern => {
+                        self.l.col_idcs.push(self.pivots[j as usize].unwrap());
+                    },
+                    GpluLMode::None => () //notheng to be done
+                }
+            }
+        }
+
+        //pivot found?
+        if pivot.is_some() {
+            let pivot = pivot.unwrap();
+            // L[i, i] <-- x[pivot], last entry of the row
+            match self.mode {
+                GpluLMode::Full => {
+                    self.l.col_idcs.push(row - self.defficiency);
+                    self.l.values.push(self.x[pivot as usize].clone());
+                    //finish the row
+                    self.l.row_idcs.push(self.l.col_idcs.len());
+                    self.l.nrows += 1;
+                    self.l.ncols += 1;
+                },
+                GpluLMode::Pattern => {
+                    self.l.col_idcs.push(row - self.defficiency);
+                    //finish the row
+                    self.l.row_idcs.push(self.l.col_idcs.len());
+                    self.l.nrows += 1;
+                    self.l.ncols += 1;
+                },
+                GpluLMode::None => () //notheng to be done
+            }
+            //record new pivot
+            self.pivots[pivot as usize] = Some(row - self.defficiency);
+            self.pivot_cols.push(pivot);
+
+            //pivot must be the first entry in U[i]
+            self.u.col_idcs.push(pivot);
+            self.u.values.push(self.u.field.one());
+
+            //sent the remaining non-pivot coefficients into U
+            let beta = self.u.field.inv(&self.x[pivot as usize]);
+            for px in top..self.mat.ncols() {
+                let j = self.xj[px as usize];
+
+                if self.pivots[j as usize].is_none() {
+                    let val = self.u.field.mul(&self.x[j as usize], &beta);
+                    if !self.u.field.is_zero(&val) {
+                        self.u.col_idcs.push(j);
+                        self.u.values.push(val);
+                    }
+                }
+            }
+            
+			//finish the new row in U
+            self.u.row_idcs.push(self.u.values.len());
+            self.u.nrows += 1;
+
+            return Some(pivot);
+        }
+        //else: need to remove the parts of L that we already added
+        match self.mode {
+            GpluLMode::Full | GpluLMode::Pattern=> {
+                self.l.values.truncate(*self.l.row_idcs.last().unwrap());
+                self.l.col_idcs.truncate(*self.l.row_idcs.last().unwrap());
+            },
+            GpluLMode::None => () //nothing to be done
+        }
+
+        //row is linearly dependent, nothing to do, but record defficiency
+        self.defficiency += 1;
 
         None
 	}
+
+    /// Perform a forward solution of the eqn x * U = mat[row]
+    ///
+    /// Helper function of gplu_row().
+    /// The solution is scattering in the member variable x, and its pattern is given in xj[top..mat.ncols],
+    /// where top is the return value and xj is a member variable of self and has length mat.ncols.
+    /// The precise semantics is as follows. Define
+    ///    x_a = { j in [0..mat.ncols] : pivots[j] == None }
+    ///    x_b = { j in [0..mat.ncols] : pivots[j] == Some(_) }
+    /// Then x_b * U + u_a == mat[row]. It follows that x * U == y has a solution iff x_a is empty.
+    /// This requires that the pivots in U are all equal to 1.
+    /// (Technically it does not require that the pivot are the first entry of the row, but we always have that...)
+    fn sparse_forward_solve(&mut self, row : u32) -> u32 {
+        //compute non-zero pattern of x
+        let top = self.reach(row);
+
+        //clear x and scatter mat[k] into x, i.e. x = mat[k]
+        for px in top..self.mat.ncols() {
+            self.x[self.xj[px as usize] as usize] = self.u.field.zero();
+        }
+        self.mat.scatter(row, &self.mat.field.one(), &mut self.x);
+
+        //iterate over the precomputed pattern of x
+        for px in top..self.mat.ncols() {
+            let j = self.xj[px as usize];//x[j] is generically nonzero (except for accidental numerical cancellations)
+            //locate corresponding pivot if there is any
+            let i = self.pivots[j as usize];
+
+            if i.is_none() {
+                continue;
+            }
+
+            let i = i.unwrap();
+            //the pivot on row i is 1, so we just have to multiply by -x[j]
+            let backup = self.x[j as usize].clone();
+
+            self.u.scatter(i, &self.mat.field.neg(&self.x[j as usize]), &mut self.x);
+            debug_assert!(self.mat.field.is_zero(&self.x[j as usize]));
+            self.x[j as usize] = backup;
+        }
+
+        top
+        
+    }
+
+    /// Compute the reachability of columns of U from all column indices in mat[row]
+    ///
+    /// Helper function of sparse_forward_solve().
+    /// The member variables xj, pstack, and marks of self must be of size u.ncols and zeroed out the first time this function is called.
+    /// On output, the set of reachable columns is written in xj[top..u.ncols], where top is the return value.
+    /// xj, pstack, and marks remain in a usable state for further calls of this function ond doesn't need to be zeroed out.
+    fn reach(&mut self, row : u32) -> u32 {
+        let mut top = self.mat.ncols();
+
+        //iterate over the kth row of mat. For each column index j present in mat[k] check if j is in the pattern
+        //(i.e. if it's marked). If not, start a DFS from j and add to the pattern all columns reachable from j
+        for px in self.mat.row_idcs[row as usize]..self.mat.row_idcs[(row + 1) as usize] {
+            let j = self.mat.col_idcs[px];
+            if !self.marks[j as usize] {
+                top = self.dfs(j, top);
+            }
+        }
+        //unmark all marked nodes
+        for px in top..self.mat.ncols() {
+            self.marks[self.xj[px as usize] as usize] = false;
+        }
+        top
+    }
+
+    /// Depth-first-serach along alternating paths of a bipartite graph representation of U.
+    ///
+    /// If a column j is pivotal (pivots[j] != None), then move to the row (call it i)
+    /// containing the pivot; explore columns adjacent to row i, depth first.
+    /// The traversal starts at col_start.
+    ///
+    /// At the end, the list of traversed nodes is in xj[top..u.ncols], where top is the return value.
+    fn dfs(&mut self, jstart : u32, mut top : u32) -> u32 {
+        //initialize the recursion stack (columns waiting to be traversed)
+        //he stack is held at the beginning of xj, and has 'head' elements
+        let mut head : u32 = 0;
+        self.xj[head as usize] = jstart;
+
+        loop {
+            //get j from the top of the recursion stack
+            let j = self.xj[head as usize];
+            let i = self.pivots[j as usize];
+
+            if !self.marks[j as usize] {
+                //mark column j as seen and initialize pstack. This is done only once
+                self.marks[j as usize] = true;
+                self.pstack[head as usize] = 0;
+            }
+
+            if i.is_none() {
+                //push initial column in the output stack and pop out from the recursion stack
+                top -= 1;
+                self.xj[top as usize] = self.xj[head as usize];
+                if head == 0 {
+                    break;
+                }//else
+                head -= 1;
+                continue;
+            }
+
+            let i = i.unwrap();
+
+            //size of row i
+            let row_weight_i = self.u.row_weight(i);
+
+            //examine all yet-unseen entries of row i
+            let mut k : u32 = self.pstack[head as usize];
+            while k < row_weight_i {
+                let px = self.u.row_idcs[i as usize] + (k as usize);
+                let j2 = self.u.col_idcs[px];
+                if self.marks[j2 as usize] {
+                    //step
+                    k += 1;
+                    continue;
+                }
+                //interrupt the enumeration of entries of row i and start DFS from column j2
+                self.pstack[head as usize] = k + 1;
+                head += 1;
+                self.xj[head as usize] = j2;
+                break;
+            }
+            if k == row_weight_i {
+                //row i fully examined; push initial column in the output stack and pop it from the recursion stack
+                top -= 1;
+                self.xj[top as usize] = self.xj[head as usize];
+                if head == 0 {
+                    break;
+                }
+                head -= 1;
+            }
+            
+        }
+        top
+    }
 }
