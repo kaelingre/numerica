@@ -81,6 +81,53 @@ impl<F: Ring> SparseMatrix<F> {
         }
     }
 
+    /// Create a sparse matrix from ordered triplets of (row, column, entry)
+    ///
+    /// # Arguments
+    /// * `nrows` - number of rows
+    /// * `ncols` - number of columns
+    /// * `triplets` - ordered(!) triplets of (row, column, entry). Row and column indices are 0-indexed
+    /// * `field` - the ring/field of the matrix entries
+    ///
+    /// # Example
+    /// ```rust
+    /// use numerica::tensors::sparse::{SparseMatrix};
+    /// use numerica::domains::integer::{IntegerRing, Integer};
+    /// let r = IntegerRing::new();
+    ///
+    /// let mat = SparseMatrix::from_triplets(4,3, vec![(0,0,Integer::new(15)),(0,2,Integer::new(-23)),(2,1,Integer::new(-7)),(2,2,Integer::new(2)),(3,0,Integer::new(-1))], r);
+    /// println!("{}", mat.fmt_mma());
+    /// assert_eq!(mat.fmt_mma(), "{{{1,1}->15,{1,3}->-23,{3,2}->-7,{3,3}->2,{4,1}->-1},{4,3}}");
+    /// ```
+    /// 
+    pub fn from_triplets(nrows: u32, ncols: u32, triplets : Vec<(u32, u32, F::Element)>, field: F) -> SparseMatrix<F> {
+        debug_assert!(triplets.is_sorted_by_key(|&(row, col, _) | (row, col)));
+        let mut ret = SparseMatrix {
+            values: Vec::with_capacity(triplets.len()),
+            row_idcs: Vec::with_capacity((nrows + 1) as usize),
+            col_idcs: Vec::with_capacity(triplets.len()),
+            nrows,
+            ncols,
+            field,
+        };
+        ret.row_idcs.push(0);
+        let mut current_row : u32 = 0;
+        for (row, col, el) in triplets {
+            while current_row < row {
+                //start new row/insert empty rows
+                ret.row_idcs.push(ret.values.len());
+                current_row += 1;
+            }
+            ret.values.push(el);
+            ret.col_idcs.push(col);
+        }
+        //finish up the row_idcs
+        ret.row_idcs.push(ret.values.len());
+        debug_assert!(ret.row_idcs.len() == (ret.nrows + 1) as usize);
+
+        ret
+    }
+
     /// Return the number of rows.
     pub fn nrows(&self) -> u32 {
         self.nrows as u32
@@ -232,12 +279,12 @@ pub enum GpluLMode {
     None
 }
 
-/// Performs an (GP)LU decomposition on a sparse matrix.
+/// Performs an (GP)LU decomposition of a sparse matrix.
 ///
 /// I.e. for a given matrix A we compute L*U = A, where U is upper triangular up to row permutations and L is lower triangular.
-/// One may submit a whole system and run the reduction, but one may also choose to submit row by row which is the immediately process
+/// One may submit a whole system and run the reduction, but one may also choose to submit row by row which is then immediately process
 /// according to the GPLU algorithm, see [https://www-almasty.lip6.fr/~bouillaguet/static/publis/CASC16.pdf].
-/// The algorithm is adapted from the SpaSM library, it is essentially the function spasm_LU in commit 965089a of SpaSM.
+/// The algorithm is adapted from the SpaSM library, it is essentially a rewrite of the function spasm_LU in commit 965089a of SpaSM.
 /// After the LU decomposition, a backsubstitution can be applied to U in order to obtain a RREF form of A (with reversed row ordering).
 ///
 /// # Type parameters
