@@ -13,6 +13,8 @@
 //! let mat = SparseMatrix::from_csr(2,3,vec![Integer::new(10),Integer::new(7),Integer::new(13)],vec![0,2,3],vec![0,2,1],r);
 //! assert_eq!(mat.fmt_mma(), "{{{1,1}->10,{1,3}->7,{2,2}->13},{2,3}}");
 
+use std::ops::{Neg, Add, AddAssign, Sub, SubAssign, Mul, MulAssign};
+
 use itertools::Itertools;
 
 use crate::{
@@ -21,9 +23,126 @@ use crate::{
     }
 };
 
-/// A sparse matrix in compressed sparse row (CSR) format
+/// A sparse vector in a compressed format (compressed sparse row style).
 ///
-/// We keep each row sorted at all times. Makes the algorithms slightly faster.
+/// We keep the entries sorted by their index at all times.
+#[derive(Clone, Hash, PartialEq, Eq, Debug)]
+pub struct SparseVector<F: Ring> {
+    /// The non-zero entries of the vector sorted by index.
+    pub(crate) values: Vec<F::Element>,
+    /// The indices corresponding to the entries of `values`.
+    /// Must have the same length a `values`.
+    pub(crate) idcs: Vec<u32>,
+    /// The size/length of the vector.
+    pub(crate) len : u32,
+    /// The ring/field of the elements of the matrix
+    pub(crate) field: F,
+}
+
+impl<F: Ring> SparseVector<F> {
+    /// Create a new zeroed sparse vector over the ring/feld `F` of length `len`.
+    pub fn new(len : u32, field: F) -> SparseVector<F> {
+        SparseVector {
+            values : Vec::new(),
+            idcs : Vec::new(),
+            len : len,
+            field : field
+        }
+    }
+
+    /// Create a new sparse vector from CSR-like data.
+    ///
+    /// The values vector should optimally not contain any zero elements. We do not check this, so it will be carried along.
+    /// * `len` - The length of the vector.
+    /// * `values` - Sorted (by index) non-zero entries of the vector..
+    /// * `idcs` - The sorted indices/positions of the values.
+    /// * `field` - the field of the vector entries.
+    ///
+    pub fn from_csr(len : u32, values : Vec<F::Element>, idcs : Vec<u32>, field : F) -> SparseVector<F> {
+        SparseVector {
+            values,
+            idcs,
+            len,
+            field
+        }
+    }
+
+    /// Create a new sparse vector from CSR-like data.
+    ///
+    /// The values vector should optimally not contain any zero elements. We do not check this, so it will be carried along.
+    /// * `len` - The length of the vector.
+    /// * `values` - Sorted (by index) non-zero entries of the vector..
+    /// * `idcs` - The sorted indices/positions of the values.
+    /// * `field` - the field of the vector entries.
+    ///
+    pub fn from_csr_slices(len : u32, values : &[F::Element], idcs : &[u32], field : F) -> SparseVector<F> {
+        SparseVector {
+            values : values.to_vec(),
+            idcs : idcs.to_vec(),
+            len,
+            field
+        }
+    }
+
+    /// Create a new sparse vector from (pos, value) pairs.
+    ///
+    /// The values should optimally not contain any zero elements. We do not check this, so it will be carried along.
+    /// * `len` - The length of the vector.
+    /// * `pairs` - (pos, vaule) pairs of the non-zero entries.
+    /// * `field` - the field of the vector entries.
+    ///
+    pub fn from_pairs(len : u32, pairs : Vec<(u32, F::Element)>, field : F) -> SparseVector<F> {
+        let n = pairs.len();
+        let mut idcs = Vec::with_capacity(n);
+        let mut values = Vec::with_capacity(n);
+
+        for (i, v) in pairs {
+            idcs.push(i);
+            values.push(v);
+        }
+        
+        SparseVector {
+            values,
+            idcs,
+            len,
+            field
+        }
+    }
+
+    /// Create a new sparse vector from (pos, value) pairs.
+    ///
+    /// The values should optimally not contain any zero elements. We do not check this, so it will be carried along.
+    /// * `len` - The length of the vector.
+    /// * `pairs` - (pos, vaule) pairs of the non-zero entries.
+    /// * `field` - the field of the vector entries.
+    ///
+    pub fn from_pairs_slices(len : u32, pairs : &[(u32, F::Element)], field : F) -> SparseVector<F> {
+        let n = pairs.len();
+        let mut idcs = Vec::with_capacity(n);
+        let mut values = Vec::with_capacity(n);
+
+        for (i, v) in pairs {
+            idcs.push(*i);
+            values.push(v.clone());
+        }
+        
+        SparseVector {
+            values,
+            idcs,
+            len,
+            field
+        }
+    }
+
+    /// Return the length of the vector .
+    pub fn len(&self) -> u32 {
+        self.len
+    }
+}
+
+/// A sparse matrix in compressed sparse row (CSR) format.
+///
+/// We keep each row sorted at all times.
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct SparseMatrix<F: Ring> {
     /// The non-zero entries of the matrix sorted by row and column
@@ -75,6 +194,28 @@ impl<F: Ring> SparseMatrix<F> {
             values,
             row_idcs,
             col_idcs,
+            nrows,
+            ncols,
+            field
+        }
+    }
+
+    /// Create a new sparse matrix over the ring/field `F` from explicit CSR data
+    ///
+    /// The values vector should optimally not contain any zero elements. We do not check this, so it will be carried along.
+    /// * `nrows` - number of rows
+    /// * `ncols` - number of columns
+    /// * `values` - non-zero entries sorted by row and column
+    /// * `row_idcs` - indices where new rows start within `values`, including an after-end index
+    /// * `col_idcs` - column indices corresponding to entries of `values`
+    /// * `field` - the field of the matrix entries
+    pub fn from_csr_slices(nrows: u32, ncols: u32, values: &[F::Element], row_idcs: &[usize], col_idcs: &[u32], field: F) -> SparseMatrix<F> {
+        assert!(values.len() == col_idcs.len());
+        assert!(row_idcs.len() == ((nrows + 1) as usize));
+        SparseMatrix {
+            values : values.to_vec(),
+            row_idcs : row_idcs.to_vec(),
+            col_idcs : col_idcs.to_vec(),
             nrows,
             ncols,
             field
@@ -198,6 +339,51 @@ impl<F: Ring> SparseMatrix<F> {
         }
     }
 
+    /// Append a column to the right of the matrix
+    pub fn append_col(&mut self, col: SparseVector<F>) -> () {
+        debug_assert_eq!(col.values.len(), col.idcs.len());
+        assert_eq!(col.len(), self.nrows);
+
+        let old_values = std::mem::take(&mut self.values);
+        let old_col_idcs = std::mem::take(&mut self.col_idcs);
+
+        let mut new_values = Vec::with_capacity(old_values.len() + col.values.len());
+        let mut new_col_idcs = Vec::with_capacity(old_col_idcs.len() + col.idcs.len());
+
+        let mut old_values_iter = old_values.into_iter();
+        let mut old_col_idcs_iter = old_col_idcs.into_iter();
+        let mut col_iter = col.idcs.into_iter().zip(col.values.into_iter());
+
+        let mut current_col = col_iter.next();
+
+        for row in 0..self.nrows as usize {
+            let row_start = self.row_idcs[row];
+            let row_end = self.row_idcs[row + 1];
+            let row_len = row_end - row_start;
+
+            // update row_idcs
+            self.row_idcs[row] = new_values.len();
+
+            // move old values
+            new_values.extend(old_values_iter.by_ref().take(row_len));
+            new_col_idcs.extend(old_col_idcs_iter.by_ref().take(row_len));
+
+            // move value from new column
+            if current_col.as_ref().map_or(false, |&(idx, _)| idx as usize == row) {
+                let (_, val) = current_col.take().unwrap();
+                new_values.push(val);
+                new_col_idcs.push(self.ncols);
+                current_col = col_iter.next();
+            }
+        }
+        //update after-the-end
+        self.row_idcs[self.nrows as usize] = new_values.len();
+
+        self.values = new_values;
+        self.col_idcs = new_col_idcs;
+        self.ncols += 1;
+    }
+
     /// Return the number of non-zero entries in the given row.
     pub fn row_weight(&self, row : u32) -> u32 {
         (self.row_idcs[(row + 1) as usize] - self.row_idcs[row as usize]) as u32
@@ -212,7 +398,7 @@ impl<F: Ring> SparseMatrix<F> {
         }
     }
 
-    /// Format in Mathematica format
+    /// Format in Mathematica form
     ///
     /// Simply apply `SparseArray@@` to the output in MMA.
     ///
@@ -268,6 +454,296 @@ impl<F: Ring> SparseMatrix<F> {
     }
 }
 
+impl<F: Field> SparseMatrix<F> {
+    
+}
+
+impl<F: Ring> Neg for SparseMatrix<F> {
+    type Output = SparseMatrix<F>;
+
+    /// Negate each entry of the matrix
+    fn neg(mut self) -> Self::Output {
+        for val in &mut self.values {
+            *val = self.field.neg(&*val);
+        }
+
+        self
+    }
+}
+
+impl<F: Ring> Add<&SparseMatrix<F>> for &SparseMatrix<F> {
+    type Output = SparseMatrix<F>;
+
+    /// Add two sparse matrices
+    fn add(self, rhs: &SparseMatrix<F>) -> Self::Output {
+        if self.nrows != rhs.nrows || self.nrows != rhs.nrows {
+            panic!(
+                "Cannot add sparse matrices of different dimensions: ({},{}) vs ({},{})",
+                self.nrows, self.ncols, rhs.nrows, rhs.ncols
+            );
+        }
+        if self.field != rhs.field {
+            panic!(
+                "Cannot add sparse matrices over different fields: {} vs {}",
+                self.field, rhs.field
+            );
+        }
+
+        if self.values.is_empty() {
+            return rhs.clone();
+        }
+        if rhs.values.is_empty() {
+            return self.clone();
+        }
+
+        let mut values = Vec::new();
+        let mut col_idcs = Vec::new();
+        let mut row_idcs = Vec::with_capacity((self.nrows + 1) as usize);
+        row_idcs.push(0);
+
+        //iterate through both matrices simultaneously
+        for row in 0..self.nrows as usize {
+            let mut lhs_idx = self.row_idcs[row];
+            let mut rhs_idx = rhs.row_idcs[row];
+            let lhs_end = self.row_idcs[row + 1];
+            let rhs_end = rhs.row_idcs[row + 1];
+
+            //iterate through row entries
+            while lhs_idx < lhs_end || rhs_idx < rhs_end {
+                match (lhs_idx < lhs_end, rhs_idx < rhs_end) {
+                    (true, true) => {
+                        let lhs_col = self.col_idcs[lhs_idx];
+                        let rhs_col = rhs.col_idcs[rhs_idx];
+
+                        if lhs_col == rhs_col {
+                            let sum = self.field.add(&self.values[lhs_idx], &rhs.values[rhs_idx]);
+
+                            if !self.field.is_zero(&sum) {
+                                col_idcs.push(lhs_col);
+                                values.push(sum)
+                            }
+                            lhs_idx += 1;
+                            rhs_idx += 1;
+                        } else if lhs_col < rhs_col {
+                            col_idcs.push(lhs_col);
+                            values.push(self.values[lhs_idx].clone());
+                            lhs_idx += 1;
+                        } else {
+                            col_idcs.push(rhs_col);
+                            values.push(rhs.values[rhs_idx].clone());
+                            rhs_idx += 1;
+                        }
+                    },
+                    (true, false) => {
+                        col_idcs.push(self.col_idcs[lhs_idx]);
+                        values.push(self.values[lhs_idx].clone());
+                        lhs_idx += 1;
+                    },
+                    (false, true) => {
+                        col_idcs.push(rhs.col_idcs[rhs_idx]);
+                        values.push(rhs.values[rhs_idx].clone());
+                        rhs_idx += 1;
+                    },
+                    (false, false) => unreachable!(),
+                }
+            }
+
+            row_idcs.push(values.len());
+        }
+
+        SparseMatrix {
+            values,
+            row_idcs,
+            col_idcs,
+            nrows : self.nrows,
+            ncols : self.ncols,
+            field : self.field.clone(),
+        }
+    }
+}
+
+impl<F: Ring> AddAssign<&SparseMatrix<F>> for SparseMatrix<F> {
+    /// Add two sparse matrices in place
+    fn add_assign(&mut self, rhs: &SparseMatrix<F>) {
+        *self = &*self + rhs;
+    }
+}
+
+impl<F: Ring> Sub<&SparseMatrix<F>> for &SparseMatrix<F> {
+    type Output = SparseMatrix<F>;
+
+    /// Add two sparse matrices
+    fn sub(self, rhs: &SparseMatrix<F>) -> Self::Output {
+        if self.nrows != rhs.nrows || self.nrows != rhs.nrows {
+            panic!(
+                "Cannot subtract sparse matrices of different dimensions: ({},{}) vs ({},{})",
+                self.nrows, self.ncols, rhs.nrows, rhs.ncols
+            );
+        }
+        if self.field != rhs.field {
+            panic!(
+                "Cannot subtract sparse matrices over different fields: {} vs {}",
+                self.field, rhs.field
+            );
+        }
+
+        if self.values.is_empty() {
+            return rhs.clone().neg();
+        }
+
+        if rhs.values.is_empty() {
+            return self.clone();
+        }
+
+        let mut values = Vec::new();
+        let mut col_idcs = Vec::new();
+        let mut row_idcs = Vec::with_capacity((self.nrows + 1) as usize);
+        row_idcs.push(0);
+
+        //iterate through both matrices simultaneously
+        for row in 0..self.nrows as usize {
+            let mut lhs_idx = self.row_idcs[row];
+            let mut rhs_idx = rhs.row_idcs[row];
+            let lhs_end = self.row_idcs[row + 1];
+            let rhs_end = rhs.row_idcs[row + 1];
+
+            //iterate through row entries
+            while lhs_idx < lhs_end || rhs_idx < rhs_end {
+                match (lhs_idx < lhs_end, rhs_idx < rhs_end) {
+                    (true, true) => {
+                        let lhs_col = self.col_idcs[lhs_idx];
+                        let rhs_col = rhs.col_idcs[rhs_idx];
+
+                        if lhs_col == rhs_col {
+                            let sum = self.field.sub(&self.values[lhs_idx], &rhs.values[rhs_idx]);
+
+                            if !self.field.is_zero(&sum) {
+                                col_idcs.push(lhs_col);
+                                values.push(sum)
+                            }
+                            lhs_idx += 1;
+                            rhs_idx += 1;
+                        } else if lhs_col < rhs_col {
+                            col_idcs.push(lhs_col);
+                            values.push(self.values[lhs_idx].clone());
+                            lhs_idx += 1;
+                        } else {
+                            col_idcs.push(rhs_col);
+                            values.push(self.field.neg(&rhs.values[rhs_idx]));
+                            rhs_idx += 1;
+                        }
+                    },
+                    (true, false) => {
+                        col_idcs.push(self.col_idcs[lhs_idx]);
+                        values.push(self.values[lhs_idx].clone());
+                        lhs_idx += 1;
+                    },
+                    (false, true) => {
+                        col_idcs.push(rhs.col_idcs[rhs_idx]);
+                        values.push(self.field.neg(&rhs.values[rhs_idx]));
+                        rhs_idx += 1;
+                    },
+                    (false, false) => unreachable!(),
+                }
+            }
+
+            row_idcs.push(values.len());
+        }
+
+        SparseMatrix {
+            values,
+            row_idcs,
+            col_idcs,
+            nrows : self.nrows,
+            ncols : self.ncols,
+            field : self.field.clone(),
+        }
+    }
+}
+
+impl<F: Ring> SubAssign<&SparseMatrix<F>> for SparseMatrix<F> {
+    /// Subtract two sparse matrices in place
+    fn sub_assign(&mut self, rhs: &SparseMatrix<F>) {
+        *self = &*self - rhs;
+    }
+}
+
+impl<F: Ring> Mul<&SparseMatrix<F>> for &SparseMatrix<F> {
+    type Output = SparseMatrix<F>;
+
+    /// Multiply two sparse matrices.
+    fn mul(self, rhs: &SparseMatrix<F>) -> Self::Output {
+        if self.ncols != rhs.nrows {
+            panic!(
+                "Cannot multiply sparse matrices of non-matching shapes: ({},{}) * ({},{})",
+                self.nrows, self.ncols, rhs.nrows, rhs.ncols
+            );
+        }
+        if self.field != rhs.field {
+            panic!(
+                "Cannot multiply sparse matrices over different fields: {} vs {}",
+                self.field, rhs.field
+            );
+        }
+
+        let mut values = Vec::new();
+        let mut col_idcs = Vec::new();
+        let mut row_idcs = Vec::with_capacity((self.nrows + 1) as usize);
+        row_idcs.push(0);
+
+        // temporary dense vector to accumulate the output for the row we are working on
+        let mut row_acc = vec![self.field.zero(); rhs.ncols as usize];
+
+        //handle row by row in self/LHS
+        for row in 0..self.nrows as usize {
+            //reset row_acc
+            for val in &mut row_acc {
+                *val = self.field.zero();
+            }
+
+            //iterate over the row elements
+            for lhs_idx in self.row_idcs[row]..self.row_idcs[row + 1] {
+                let lhs_col = self.col_idcs[lhs_idx];
+                let lhs_val = &self.values[lhs_idx];
+
+                //iterate over the corresponding row in RHS
+                for rhs_idx in rhs.row_idcs[lhs_col as usize]..rhs.row_idcs[(lhs_col + 1) as usize] {
+                    let rhs_col = rhs.col_idcs[rhs_idx];
+                    let rhs_val = &rhs.values[rhs_idx];
+
+                    row_acc[rhs_col as usize] = self.field.add(&row_acc[rhs_col as usize], &self.field.mul(lhs_val, rhs_val));
+                }
+            }
+
+            // push non-zero entries into a new row of the return matrix
+            for (col, val) in row_acc.iter().enumerate() {
+                if !self.field.is_zero(&val) {
+                    col_idcs.push(col as u32);
+                    values.push(val.clone());
+                }
+            }
+
+             row_idcs.push(values.len());
+        }
+
+        SparseMatrix {
+     	    values,
+        	col_idcs,
+	        row_idcs,
+    	    nrows : self.nrows,
+        	ncols : rhs.ncols,
+	        field : self.field.clone(),
+	    }
+    }
+}
+
+impl<F: Ring> MulAssign<&SparseMatrix<F>> for SparseMatrix<F> {
+    /// Multiply two sparse matrices in place
+    fn mul_assign(&mut self, rhs: &SparseMatrix<F>) {
+        *self = &*self * rhs;
+    }
+}
+
 /// An option for `Gplu` of how to handle the L matrix
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GpluLMode {
@@ -285,7 +761,7 @@ pub enum GpluLMode {
 /// One may submit a whole system and run the reduction, but one may also choose to submit row by row which is then immediately process
 /// according to the GPLU algorithm, see [https://www-almasty.lip6.fr/~bouillaguet/static/publis/CASC16.pdf].
 /// The algorithm is adapted from the SpaSM library, it is essentially a rewrite of the function spasm_LU in commit 965089a of SpaSM.
-/// After the LU decomposition, a backsubstitution can be applied to U in order to obtain a RREF form of A (with reversed row ordering).
+/// After the LU decomposition, a backsubstitution can be applied to U in order to obtain a RREF form of A (up to row permutations).
 ///
 /// # Type parameters
 /// * `F` - the field of the matrix entries
@@ -300,14 +776,10 @@ pub struct Gplu<F: Field> {
     /// The L output matrix
     l : SparseMatrix<F>,
     
-    /// The pivots positions of U for each column.
-    /// I.e. there is a pivot on column j and row pivot[j].
-    pivots : Vec<Option<u32> >,
+    /// The pivot positions of U for each column.
+    /// I.e. there is a pivot on column j and row pivots[j]. No pivot present if None.
+    pivots : Vec<Option<u32>>,
     
-    /// The pivot columns of U
-    /// The inverse of pivots: The vector has one entry per row in U indicating the position of the pivot in that row
-    pivot_cols : Vec<u32>,
-
     /// Whether to keep the L matrix, just record the pattern or don't record anything at all
     mode : GpluLMode,
 
@@ -342,12 +814,8 @@ impl<F: Field> Gplu<F> {
             mat: SparseMatrix::new(0, ncols, field.clone()),
             u: SparseMatrix::new(0, ncols, field.clone()),
             x : vec![field.zero(); ncols as usize],
-            l: match mode {
-                GpluLMode::Full | GpluLMode::Pattern => SparseMatrix::new(0, ncols, field),
-                GpluLMode::None => SparseMatrix::new(0, 0, field)
-            },
+            l: SparseMatrix::new(0, 0, field),
             pivots : vec![None; ncols as usize],
-            pivot_cols : Vec::new(),
             mode : mode,
             defficiency : 0,
             xj : vec![0; ncols as usize],
@@ -363,12 +831,8 @@ impl<F: Field> Gplu<F> {
         let mut ret = Gplu {
             u: SparseMatrix::new(0, mat.ncols(), mat.field().clone()),
             x : vec![mat.field().zero(); mat.ncols() as usize],
-            l: match mode {
-                GpluLMode::Full | GpluLMode::Pattern => SparseMatrix::new(0, mat.ncols(), mat.field().clone()),
-                GpluLMode::None => SparseMatrix::new(0, 0, mat.field().clone())
-            },
+            l: SparseMatrix::new(0, 0, mat.field().clone()),
             pivots : vec![None; mat.ncols() as usize],
-            pivot_cols : Vec::new(),
             mode : mode,
             defficiency : 0,
             xj : vec![0; mat.ncols() as usize],
@@ -396,6 +860,12 @@ impl<F: Field> Gplu<F> {
     /// Return the L matrix
     pub fn l(&self) -> &SparseMatrix<F> {
         &self.l
+    }
+
+    /// Return the pivot positions of U for each column.
+    /// I.e. there is a pivot on column j and row pivots()[j]. No pivot present if None.
+    pub fn pivots(&self) -> &Vec<Option<u32>> {
+        &self.pivots
     }
 
     /// Adds a new row to the system and processes it in the next GPLU step
@@ -448,15 +918,6 @@ impl<F: Field> Gplu<F> {
             }
         }
         self.pivots = new_pivots;
-        
-        //update pivot_cols, row by row
-        for row in 0..self.pivot_cols.len() {
-            let mut col_pos_it : usize = 0;
-            while col_pos_it < col_pos.len() && col_pos[col_pos_it] <= self.pivot_cols[row] {
-                col_pos_it += 1;
-            }
-            self.pivot_cols[row] += col_pos_it as u32;
-        }
 
         //update x
         self.x.resize(self.mat.ncols() as usize, self.mat.field().zero());
@@ -470,23 +931,71 @@ impl<F: Field> Gplu<F> {
         self.marks.fill(false);
     }
 
-    /// Applies backsubstitution to the U matrix to bring it into RREF form with reversed row ordering.
-    pub fn backsubstitute(&self) -> SparseMatrix<F> {
-        //idea: we construct a new Gplu system and add rows from U to it, starting with the one that has the pivot furthest to the right
-        let mut gplu = Gplu::new(self.u.ncols(), self.u.field.clone(), GpluLMode::None);
-        //gplu.u.values.reserve(self.u.values.len()); //TODO: should we reserve here?
-        //gplu.u.col_idcs.reserve(self.u.col_idcs.len()); //TODO: should we reserve here?
-        //gplu.u.row_idcs.reserve(self.u.row_idcs.len()); //TODO: should we reserve here?
+    /// Applies backsubstitution to the U matrix to bring it into RREF form (up to row permutations).
+    ///
+    /// We do not keep track of the L matrix, so GpluLMode will be set to `None` and the L matrix will be emptied.
+    pub fn back_substitution(&mut self) -> () {
+        //Follow the algorithm in SpaSM 1.3 in bench/rref.c by virtually removing the row into which we want to back-substitute all the "below" rows.
+        //We then add the row again to the system (or rather just call forward solve) which gives us the back-substituted version of this row
 
-        //iterate over the rows starting from the one with pivot to the furthest right
-        for row in self.pivots.iter().rev().flatten() {
-            //prepare the vectors for add_row
-            let values = self.u.values[self.u.row_idcs[*row as usize]..self.u.row_idcs[(row + 1) as usize]].to_vec();
-            let col_idcs = self.u.col_idcs[self.u.row_idcs[*row as usize]..self.u.row_idcs[(row + 1) as usize]].to_vec();
-            gplu.add_row(values, col_idcs);
+        println!("U={}", self.u.fmt_mma());
+
+        //clear L if necessary
+        match self.mode {
+            GpluLMode::Full => {
+                self.l.values.clear();
+                self.l.col_idcs.clear();
+                self.l.row_idcs.clear();
+                self.l.nrows = 0;
+                self.l.ncols = 0;
+                self.mode = GpluLMode::None;
+            },
+            GpluLMode::Pattern => {
+                self.l.col_idcs.clear();
+                self.l.row_idcs.clear();
+                self.l.nrows = 0;
+                self.l.ncols = 0;
+                self.mode = GpluLMode::None;
+            },
+            GpluLMode::None => () //nothing to do
         }
 
-        gplu.u
+        let mut new_u = SparseMatrix::new(0, self.u.ncols, self.u.field.clone());
+        new_u.row_idcs.reserve((self.u.nrows + 1) as usize);
+
+        //back substitute row after row
+        for row in 0..self.u.nrows as usize {
+            //get the pivot column of this row
+            let pivot_col = self.u.col_idcs[self.u.row_idcs[row]];
+            debug_assert_eq!(self.pivots[pivot_col as usize].unwrap() as usize, row);
+
+            // it is sufficient to temporarily remove the pivot entry for this row such that it will be ignored in the forward solver
+            self.pivots[pivot_col as usize] = None;
+
+            let top = self.sparse_forward_solve(row as u32, true);
+
+            //write the new row into new_u
+            //going in reversed order seems to order the entries correctly
+            for px in (top..self.u.ncols()).rev() {
+                let col = self.xj[px as usize];
+                if self.pivots[col as usize].is_none() && !self.u.field.is_zero(&self.x[col as usize]) {
+                    new_u.col_idcs.push(col);
+                    new_u.values.push(self.x[col as usize].clone());
+                }
+            }
+            new_u.nrows += 1;
+            new_u.row_idcs.push(new_u.values.len());
+
+            //check that the row is sorted
+            //TODO: understand whether this is safe to always assume.
+            //otherwise we may want to sort (as we promise to keep things sorted)
+            debug_assert!(new_u.col_idcs[new_u.row_idcs[new_u.row_idcs.len() -2]..new_u.row_idcs[new_u.row_idcs.len() - 1]].is_sorted());
+
+            //reinstate the pivot entry
+            self.pivots[pivot_col as usize] = Some(row as u32);
+        }
+
+        self.u = new_u;
     }
 
     /// Apply the GPLU algorithm to the given row
@@ -519,10 +1028,10 @@ impl<F: Field> Gplu<F> {
             //record pivot
             let pivot_col = col_idcs[row_idcs[row as usize]];
             self.pivots[pivot_col as usize] = Some(row - self.defficiency);
-            self.pivot_cols.push(pivot_col);
 
             //copy the whole row into U (and divide by leading coefficient)
-            let leading_coeff_inv = self.mat.field.inv(&values[row_idcs[row as usize]]);
+            let leading_coeff = &values[row_idcs[row as usize]];
+            let leading_coeff_inv = self.mat.field.inv(&leading_coeff);
             self.u.nrows += 1;
             let start = row_idcs[row as usize];
             let end = row_idcs[(row + 1) as usize];
@@ -539,7 +1048,7 @@ impl<F: Field> Gplu<F> {
                 GpluLMode::Full => {
                     //put a 1 on the diagonal
                     self.l.col_idcs.push(row - self.defficiency);
-                    self.l.values.push(self.mat.field.one());
+                    self.l.values.push(leading_coeff.clone());
                     //finish the row
                     self.l.row_idcs.push(self.l.col_idcs.len());
                     //update nrows/ncols
@@ -561,7 +1070,7 @@ impl<F: Field> Gplu<F> {
         }
 
         //triangular solve: x * U = mat[row]
-        let top = self.sparse_forward_solve(row);
+        let top = self.sparse_forward_solve(row, false);
 
         //find pivot and dispatch coeffs into U
         let mut pivot : Option<u32> = None;
@@ -619,13 +1128,12 @@ impl<F: Field> Gplu<F> {
             }
             //record new pivot
             self.pivots[pivot as usize] = Some(row - self.defficiency);
-            self.pivot_cols.push(pivot);
 
             //pivot must be the first entry in U[i]
             self.u.col_idcs.push(pivot);
             self.u.values.push(self.u.field.one());
 
-            //sent the remaining non-pivot coefficients into U
+            //send the remaining non-pivot coefficients into U
             let beta = self.u.field.inv(&self.x[pivot as usize]);
             for px in top..self.mat.ncols() {
                 let j = self.xj[px as usize];
@@ -642,6 +1150,11 @@ impl<F: Field> Gplu<F> {
 			//finish the new row in U
             self.u.row_idcs.push(self.u.values.len());
             self.u.nrows += 1;
+
+            //check that the row is sorted
+            //TODO: understand whether this is always safe to assume
+            //otherwise we may want to sort (as we promise to keep things sorted)
+            debug_assert!(self.u.col_idcs[self.u.row_idcs[self.u.row_idcs.len() -2]..self.u.row_idcs[self.u.row_idcs.len() - 1]].is_sorted());
 
             return Some(pivot);
         }
@@ -671,18 +1184,24 @@ impl<F: Field> Gplu<F> {
     /// Then x_b * U + u_a == mat[row]. It follows that x * U == y has a solution iff x_a is empty.
     /// This requires that the pivots in U are all equal to 1.
     /// (Technically it does not require that the pivot are the first entry of the row, but we always have that...)
-    fn sparse_forward_solve(&mut self, row : u32) -> u32 {
+    ///
+    /// # Arguments
+    /// * `row` - The row of mat that is to be forward solved.
+    /// * `use_u` - If set to true it uses U instead of mat, i.e. it solves u * U = U[row].
+    fn sparse_forward_solve(&mut self, row : u32, use_u : bool) -> u32 {
         //compute non-zero pattern of x
-        let top = self.reach(row);
+        let top = self.reach(row, use_u);
+
+        let mat = if use_u { &self.u } else { &self.mat };
 
         //clear x and scatter mat[k] into x, i.e. x = mat[k]
-        for px in top..self.mat.ncols() {
+        for px in top..mat.ncols {
             self.x[self.xj[px as usize] as usize] = self.u.field.zero();
         }
-        self.mat.scatter(row, &self.mat.field.one(), &mut self.x);
+        mat.scatter(row, &mat.field.one(), &mut self.x);
 
         //iterate over the precomputed pattern of x
-        for px in top..self.mat.ncols() {
+        for px in top..mat.ncols() {
             let j = self.xj[px as usize];//x[j] is generically nonzero (except for accidental numerical cancellations)
             //locate corresponding pivot if there is any
             let i = self.pivots[j as usize];
@@ -695,40 +1214,62 @@ impl<F: Field> Gplu<F> {
             //the pivot on row i is 1, so we just have to multiply by -x[j]
             let backup = self.x[j as usize].clone();
 
-            self.u.scatter(i, &self.mat.field.neg(&self.x[j as usize]), &mut self.x);
-            debug_assert!(self.mat.field.is_zero(&self.x[j as usize]));
+            self.u.scatter(i, &mat.field.neg(&self.x[j as usize]), &mut self.x);
+            debug_assert!(mat.field.is_zero(&self.x[j as usize]));
             self.x[j as usize] = backup;
         }
 
         top
-        
     }
 
     /// Compute the reachability of columns of U from all column indices in mat[row]
     ///
     /// Helper function of sparse_forward_solve().
+    ///
     /// The member variables xj, pstack, and marks of self must be of size u.ncols and zeroed out the first time this function is called.
     /// On output, the set of reachable columns is written in xj[top..u.ncols], where top is the return value.
     /// xj, pstack, and marks remain in a usable state for further calls of this function ond doesn't need to be zeroed out.
-    fn reach(&mut self, row : u32) -> u32 {
-        let mut top = self.mat.ncols();
+    /// # Arguments
+    /// * `row` - The row of mat that is to be forward solved.
+    /// * `use_u` - If set to true it uses U instead of mat, i.e. compute reachability for U[row]
+    fn reach(&mut self, row : u32, use_u : bool) -> u32 {
+        //TODO: code duplication below due to my poor design and borrow checker not being kind to me
+        if use_u {
+	        let mut top = self.u.ncols();
 
-        //iterate over the kth row of mat. For each column index j present in mat[k] check if j is in the pattern
-        //(i.e. if it's marked). If not, start a DFS from j and add to the pattern all columns reachable from j
-        for px in self.mat.row_idcs[row as usize]..self.mat.row_idcs[(row + 1) as usize] {
-            let j = self.mat.col_idcs[px];
-            if !self.marks[j as usize] {
-                top = self.dfs(j, top);
-            }
+	        //iterate over the kth row of mat. For each column index j present in mat[k] check if j is in the pattern
+    	    //(i.e. if it's marked). If not, start a DFS from j and add to the pattern all columns reachable from j
+        	for px in self.u.row_idcs[row as usize]..self.u.row_idcs[(row + 1) as usize] {
+            	let j = self.u.col_idcs[px];
+	            if !self.marks[j as usize] {
+    	            top = self.dfs(j, top);
+        	    }
+	        }
+    	    //unmark all marked nodes
+        	for px in top..self.u.ncols() {
+            	self.marks[self.xj[px as usize] as usize] = false;
+	        }
+            top
+        } else {
+            let mut top = self.mat.ncols();
+
+	        //iterate over the kth row of mat. For each column index j present in mat[k] check if j is in the pattern
+    	    //(i.e. if it's marked). If not, start a DFS from j and add to the pattern all columns reachable from j
+        	for px in self.mat.row_idcs[row as usize]..self.mat.row_idcs[(row + 1) as usize] {
+            	let j = self.mat.col_idcs[px];
+	            if !self.marks[j as usize] {
+    	            top = self.dfs(j, top);
+        	    }
+	        }
+    	    //unmark all marked nodes
+        	for px in top..self.mat.ncols() {
+            	self.marks[self.xj[px as usize] as usize] = false;
+	        }
+            top
         }
-        //unmark all marked nodes
-        for px in top..self.mat.ncols() {
-            self.marks[self.xj[px as usize] as usize] = false;
-        }
-        top
     }
 
-    /// Depth-first-serach along alternating paths of a bipartite graph representation of U.
+    /// Depth-first-search along alternating paths of a bipartite graph representation of U.
     ///
     /// If a column j is pivotal (pivots[j] != None), then move to the row (call it i)
     /// containing the pivot; explore columns adjacent to row i, depth first.
@@ -814,10 +1355,10 @@ mod tests {
         let r = IntegerRing::new();
         let f = FractionField::new(r);
 
-        let mut gplu = Gplu::new(6, f.clone(), GpluLMode::None);
+        let mut gplu = Gplu::new(6, f.clone(), GpluLMode::Full);
 
         {
-	        let mut values : Vec<Fraction<IntegerRing> > = Vec::new();
+	        let mut values : Vec<Fraction<IntegerRing>> = Vec::new();
     	    let mut col_idcs : Vec<u32> = Vec::new();
 
         	values.push(f.to_element(Integer::new(3),Integer::new(1),false));
@@ -831,7 +1372,7 @@ mod tests {
         }
 
         {
-	        let mut values : Vec<Fraction<IntegerRing> > = Vec::new();
+	        let mut values : Vec<Fraction<IntegerRing>> = Vec::new();
     	    let mut col_idcs : Vec<u32> = Vec::new();
 
         	values.push(f.to_element(Integer::new(-2),Integer::new(1),false));
@@ -845,7 +1386,7 @@ mod tests {
         }
 
         {
-	        let mut values : Vec<Fraction<IntegerRing> > = Vec::new();
+	        let mut values : Vec<Fraction<IntegerRing>> = Vec::new();
     	    let mut col_idcs : Vec<u32> = Vec::new();
 
         	values.push(f.to_element(Integer::new(23),Integer::new(1),false));
@@ -858,8 +1399,15 @@ mod tests {
             gplu.add_row(values, col_idcs);
         }
 
+        //check L.U == A (also checking multiplication and subtraction)
+        assert_eq!(&(gplu.l() * gplu.u()), gplu.mat());
+        assert_eq!(&(gplu.l() * gplu.u()) - gplu.mat(), SparseMatrix::new(gplu.mat().nrows(), gplu.mat.ncols(), f.clone()));
+        //check U
         assert_eq!(gplu.u().fmt_mma(), "{{{1,2}->1,{1,3}->7/3,{1,6}->13/3,{2,1}->1,{2,4}->-7,{2,5}->27/2,{3,3}->1,{3,5}->-18/107,{3,6}->299/107},{3,6}}");
-        assert_eq!(gplu.backsubstitute().fmt_mma(), "{{{1,3}->1,{1,5}->-18/107,{1,6}->299/107,{2,2}->1,{2,6}->-234/107,{2,5}->42/107,{3,1}->1,{3,4}->-7,{3,5}->27/2},{3,6}}");
+
+        gplu.back_substitution();
+        //check rref
+        assert_eq!(gplu.u().fmt_mma(), "{{{1,2}->1,{1,5}->42/107,{1,6}->-234/107,{2,1}->1,{2,4}->-7,{2,5}->27/2,{3,3}->1,{3,5}->-18/107,{3,6}->299/107},{3,6}}");
     }
 
     #[test]
@@ -871,7 +1419,7 @@ mod tests {
 
 
         {
-	        let mut values : Vec<Fraction<IntegerRing> > = Vec::new();
+	        let mut values : Vec<Fraction<IntegerRing>> = Vec::new();
     	    let mut col_idcs : Vec<u32> = Vec::new();
 
         	values.push(f.to_element(Integer::new(3),Integer::new(1),false));
@@ -885,7 +1433,7 @@ mod tests {
         }
 
         {
-	        let mut values : Vec<Fraction<IntegerRing> > = Vec::new();
+	        let mut values : Vec<Fraction<IntegerRing>> = Vec::new();
     	    let mut col_idcs : Vec<u32> = Vec::new();
 
         	values.push(f.to_element(Integer::new(-2),Integer::new(1),false));
@@ -899,7 +1447,7 @@ mod tests {
         }
 
         {
-	        let mut values : Vec<Fraction<IntegerRing> > = Vec::new();
+	        let mut values : Vec<Fraction<IntegerRing>> = Vec::new();
     	    let mut col_idcs : Vec<u32> = Vec::new();
 
         	values.push(f.to_element(Integer::new(23),Integer::new(1),false));
@@ -912,9 +1460,16 @@ mod tests {
             mat.add_row(values, col_idcs);
         }
 
-        let gplu = Gplu::from_matrix(mat, GpluLMode::None);
+        let mut gplu = Gplu::from_matrix(mat, GpluLMode::Full);
 
+        //check L.U == A (also checking multiplication and subtraction)
+        assert_eq!(&(gplu.l() * gplu.u()), gplu.mat());
+        assert_eq!(&(gplu.l() * gplu.u()) - gplu.mat(), SparseMatrix::new(gplu.mat().nrows(), gplu.mat.ncols(), f.clone()));
+        //check U
         assert_eq!(gplu.u().fmt_mma(), "{{{1,2}->1,{1,3}->7/3,{1,6}->13/3,{2,1}->1,{2,4}->-7,{2,5}->27/2,{3,3}->1,{3,5}->-18/107,{3,6}->299/107},{3,6}}");
-        assert_eq!(gplu.backsubstitute().fmt_mma(), "{{{1,3}->1,{1,5}->-18/107,{1,6}->299/107,{2,2}->1,{2,6}->-234/107,{2,5}->42/107,{3,1}->1,{3,4}->-7,{3,5}->27/2},{3,6}}");
+        
+        //check rref
+        gplu.back_substitution();
+        assert_eq!(gplu.u().fmt_mma(), "{{{1,2}->1,{1,5}->42/107,{1,6}->-234/107,{2,1}->1,{2,4}->-7,{2,5}->27/2,{3,3}->1,{3,5}->-18/107,{3,6}->299/107},{3,6}}");
     }
 }
