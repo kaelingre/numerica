@@ -13,13 +13,20 @@
 //! let mat = SparseMatrix::from_csr(2,3,vec![Integer::new(10),Integer::new(7),Integer::new(13)],vec![0,2,3],vec![0,2,1],r);
 //! assert_eq!(mat.fmt_mma(), "{{{1,1}->10,{1,3}->7,{2,2}->13},{2,3}}");
 
-use std::ops::{Neg, Add, AddAssign, Sub, SubAssign, Mul, MulAssign};
+use std::{
+    ops::{Neg, Add, AddAssign, Sub, SubAssign, Mul, MulAssign},
+    collections::{HashSet}
+};
 
 use itertools::Itertools;
 
+use rand::Rng;
+
 use crate::{
     domains::{
-        Ring, Field, RingPrinter
+        Ring, Field, RingPrinter,
+        integer::{IntegerRing, Integer},
+        rational::{FractionField, Fraction}
     }
 };
 
@@ -278,7 +285,10 @@ impl<F: Ring> SparseMatrix<F> {
             ret.col_idcs.push(col);
         }
         //finish up the row_idcs
-        ret.row_idcs.push(ret.values.len());
+        while current_row < ret.nrows {
+            ret.row_idcs.push(ret.values.len());
+            current_row += 1;
+        }
         debug_assert!(ret.row_idcs.len() == (ret.nrows + 1) as usize);
 
         ret
@@ -491,7 +501,7 @@ impl<F: Field> SparseMatrix<F> {
 		self.append_col(b);
 
         //perform gplu
-        let mut gplu = Gplu::from_matrix_checked(&self, GpluLMode::None);
+        let gplu = Gplu::from_matrix_checked(&self, GpluLMode::None);
 
         if gplu.is_none() {
             return Err(SparseMatrixError::Inconsistent)
@@ -513,6 +523,31 @@ impl<F: Field> SparseMatrix<F> {
 
         //solution is the last column of U
         Ok(gplu.u.last_column())
+    }
+}
+
+impl SparseMatrix<FractionField<IntegerRing>> {
+    /// Generate a random SparseMatrix with the given dimensions and number of entries
+    pub fn random(nrows : u32, ncols : u32, nentries : usize) -> Self {
+        assert!((nrows as usize) * (ncols as usize) > nentries);
+        //idea: generate random entry triplets and use the from_triplets constructor
+        let mut rng = rand::rng();
+
+        //generate nentries unique coordinates
+        let mut pairs : HashSet<(u32,u32)> = HashSet::with_capacity(nentries);
+        while pairs.len() < nentries {
+            pairs.insert((rng.random_range(0..(nrows-1)), rng.random_range(0..(ncols-1))));
+        }
+
+        let f = FractionField::new(IntegerRing::new());
+
+        let mut triplets : Vec<(u32,u32,Fraction<IntegerRing>)> = pairs.into_iter().enumerate().map(
+            |(_, (a, b))| (a, b, f.to_element(Integer::new(rng.random::<i64>()), Integer::new(rng.random::<i64>()), true))
+        ).collect();
+
+        triplets.sort();
+        
+        SparseMatrix::from_triplets(nrows, ncols, triplets, f)
     }
 }
 
@@ -1201,9 +1236,12 @@ impl<F: Field> Gplu<F> {
             //record new pivot
             self.pivots[pivot as usize] = Some(self.nrows - self.defficiency);
 
+            //fill in U
+            //we first collect in vector to sort them before actually inserting
+            let mut new_row : Vec<(u32, F::Element)> = Vec::new();
+
             //pivot must be the first entry in U[i]
-            self.u.col_idcs.push(pivot);
-            self.u.values.push(self.u.field.one());
+            new_row.push((pivot, self.u.field.one()));
 
             //send the remaining non-pivot coefficients into U
             let beta = self.u.field.inv(&self.x[pivot as usize]);
@@ -1213,29 +1251,39 @@ impl<F: Field> Gplu<F> {
                 if self.pivots[j as usize].is_none() {
                     let val = self.u.field.mul(&self.x[j as usize], &beta);
                     if !self.u.field.is_zero(&val) {
-                        self.u.col_idcs.push(j);
-                        self.u.values.push(val);
+                        new_row.push((j,val));
                     }
                 }
+            }
+
+            //sort
+            new_row.sort_unstable_by_key(|(col, _)| *col);
+            //move into actual U
+            self.u.values.reserve(new_row.len());
+            self.u.col_idcs.reserve(new_row.len());
+            for (col, val) in new_row {
+                self.u.col_idcs.push(col);
+                self.u.values.push(val);
             }
             
 			//finish the new row in U
             self.u.row_idcs.push(self.u.values.len());
             self.u.nrows += 1;
 
-            //check that the row is sorted
-            //TODO: understand whether this is always safe to assume
-            //otherwise we may want to sort (as we promise to keep things sorted)
-            debug_assert!(self.u.col_idcs[self.u.row_idcs[self.u.row_idcs.len() -2]..self.u.row_idcs[self.u.row_idcs.len() - 1]].is_sorted());
-
             self.nrows += 1;
             return Some(pivot);
         }
-        //else: need to remove the parts of L that we already added
+        //else: need to finish L
         match self.mode {
-            GpluLMode::Full | GpluLMode::Pattern=> {
-                self.l.values.truncate(*self.l.row_idcs.last().unwrap());
-                self.l.col_idcs.truncate(*self.l.row_idcs.last().unwrap());
+            GpluLMode::Full => {
+                //finish the row
+                self.l.row_idcs.push(self.l.col_idcs.len());
+                self.l.nrows += 1;
+            },
+            GpluLMode::Pattern => {
+                //finish the row
+                self.l.row_idcs.push(self.l.col_idcs.len());
+                self.l.nrows += 1;
             },
             GpluLMode::None => () //nothing to be done
         }
@@ -1250,12 +1298,12 @@ impl<F: Field> Gplu<F> {
     /// Perform a forward solution of the eqn x * U = sparse_row
     ///
     /// Helper function of gplu_row().
-    /// The solution is scattering in the member variable x, and its pattern is given in xj[top..ncols],
+    /// The solution is scattered in the member variable x, and its pattern is given in xj[top..ncols],
     /// where top is the return value and xj is a member variable of self and has length ncols (e.g. taken from u).
     /// The precise semantics is as follows. Define
     ///    x_a = { j in [0..ncols] : pivots[j] == None }
     ///    x_b = { j in [0..ncols] : pivots[j] == Some(_) }
-    /// Then x_b * U + u_a == sparse_row. It follows that x * U == y has a solution iff x_a is empty.
+    /// Then x_b * U + x_a == sparse_row. It follows that x * U == y has a solution iff x_a is empty.
     /// This requires that the pivots in U are all equal to 1.
     /// (Technically it does not require that the pivot are the first entry of the row, but we always have that...)
     ///
@@ -1266,7 +1314,7 @@ impl<F: Field> Gplu<F> {
         //compute non-zero pattern of x
         let top = self.reach(&col_idcs);
 
-        //clear x and scatter mat[k] into x, i.e. x = mat[k]
+        //clear x and scatter sparse_row into x, i.e. x = sparse_row
         for px in top..self.u.ncols {
             self.x[self.xj[px as usize] as usize] = self.u.field.zero();
         }
@@ -1290,7 +1338,6 @@ impl<F: Field> Gplu<F> {
             let end = self.u.row_idcs[(i + 1) as usize];
             let beta = self.u.field.neg(&self.x[j as usize]);
             Gplu::scatter(&mut self.x, &beta, &self.u.values[start..end], &self.u.col_idcs[start..end], &self.u.field);
-            //self.u.scatter(i, &mat.field.neg(&self.x[j as usize]), &mut self.x);
             debug_assert!(self.u.field.is_zero(&self.x[j as usize]));
             self.x[j as usize] = backup;
         }
@@ -1302,12 +1349,12 @@ impl<F: Field> Gplu<F> {
     ///
     /// Helper function of back_substitution(), implements the same algorithm as `sparse_forward_solve()`, but
     /// we can't call that one because of borrow checker constraints.
-    /// The solution is scattering in the member variable x, and its pattern is given in xj[top..ncols],
+    /// The solution is scattered in the member variable x, and its pattern is given in xj[top..ncols],
     /// where top is the return value and xj is a member variable of self and has length ncols (e.g. taken from u).
     /// The precise semantics is as follows. Define
     ///    x_a = { j in [0..ncols] : pivots[j] == None }
     ///    x_b = { j in [0..ncols] : pivots[j] == Some(_) }
-    /// Then x_b * U + u_a == sparse_row. It follows that x * U == y has a solution iff x_a is empty.
+    /// Then x_b * U + x_a == U[row]. It follows that x * U == y has a solution iff x_a is empty.
     /// This requires that the pivots in U are all equal to 1.
     /// (Technically it does not require that the pivot are the first entry of the row, but we always have that...)
     ///
@@ -1317,7 +1364,7 @@ impl<F: Field> Gplu<F> {
         //compute non-zero pattern of x
         let top = self.reach_u(row);
 
-        //clear x and scatter mat[k] into x, i.e. x = mat[k]
+        //clear x and scatter U[row] into x, i.e. x = U[row]
         for px in top..self.u.ncols {
             self.x[self.xj[px as usize] as usize] = self.u.field.zero();
         }
@@ -1343,7 +1390,6 @@ impl<F: Field> Gplu<F> {
             let end = self.u.row_idcs[(i + 1) as usize];
             let beta = self.u.field.neg(&self.x[j as usize]);
             Gplu::scatter(&mut self.x, &beta, &self.u.values[start..end], &self.u.col_idcs[start..end], &self.u.field);
-            //self.u.scatter(i, &mat.field.neg(&self.x[j as usize]), &mut self.x);
             debug_assert!(self.u.field.is_zero(&self.x[j as usize]));
             self.x[j as usize] = backup;
         }
@@ -1500,6 +1546,17 @@ mod tests {
     };
 
     use crate::tensors::sparse::{SparseMatrix, Gplu, GpluLMode};
+
+    #[test]
+    fn random_gplu() {
+        let mat = SparseMatrix::<FractionField<IntegerRing>>::random(100, 100, 50);
+
+        let gplu = Gplu::from_matrix(&mat, GpluLMode::Full);
+
+        //check L.U == A (also checking multiplication and subtraction)
+        assert_eq!(&(gplu.l() * gplu.u()), &mat);
+        assert_eq!(&(gplu.l() * gplu.u()) - &mat, SparseMatrix::new(mat.nrows(), mat.ncols(), FractionField::new(IntegerRing::new())));
+    }
 
     #[test]
     fn row_by_row_gplu() {
