@@ -36,3 +36,4 @@ pyo3-stub-gen = { version = "0.17", default-features = false, features = [
     "numpy",
 ], optional = true }
 itertools = "0.14.0"
+rayon = "1.11"

@@ -22,6 +22,8 @@ use itertools::Itertools;
 
 use rand::Rng;
 
+use rayon::prelude::*;
+
 use crate::{
     domains::{
         Ring, Field, RingPrinter,
@@ -881,7 +883,7 @@ pub enum GpluLMode {
 /// Performs an (GP)LU decomposition of a sparse matrix.
 ///
 /// I.e. for a given matrix A we compute L*U = A, where U is upper triangular up to row permutations and L is lower triangular.
-/// One may submit a whole system and run the reduction, but one may also choose to submit row by row which is then immediately process
+/// One may submit a whole system and run the reduction, but one may also choose to submit row by row which is then immediately processed
 /// according to the GPLU algorithm, see [https://www-almasty.lip6.fr/~bouillaguet/static/publis/CASC16.pdf].
 /// The algorithm is adapted from the SpaSM library, it is essentially a rewrite of the function spasm_LU in commit 965089a of SpaSM.
 /// After the LU decomposition, a backsubstitution can be applied to U in order to obtain a RREF form of A (up to row permutations).
@@ -1095,7 +1097,7 @@ impl<F: Field> Gplu<F> {
 
         *self = gplu;
     }
-
+    
     /// Apply the GPLU algorithm to the given row
     ///
     /// # Return
@@ -1164,7 +1166,7 @@ impl<F: Field> Gplu<F> {
         }
 
         //triangular solve: x * U = mat[row]
-        let top = self.sparse_forward_solve(values, col_idcs);
+        let top = Gplu::sparse_forward_solve(values, col_idcs, &self.u, &self.pivots, &mut self.x, &mut self.xj, &mut self.pstack, &mut self.marks);
 
         //find pivot and dispatch coeffs into U
         let mut pivot : Option<u32> = None;
@@ -1193,7 +1195,7 @@ impl<F: Field> Gplu<F> {
                     GpluLMode::Pattern => {
                         self.l.col_idcs.push(self.pivots[j as usize].unwrap());
                     },
-                    GpluLMode::None => () //notheng to be done
+                    GpluLMode::None => () //nothing to be done
                 }
             }
         }
@@ -1230,7 +1232,7 @@ impl<F: Field> Gplu<F> {
             //pivot must be the first entry in U[i]
             new_row.push((pivot, self.u.field.one()));
 
-            //send the remaining non-pivot coefficients into U
+            //send the remaining non-pivot coefficients into new row
             let beta = self.u.field.inv(&self.x[pivot as usize]);
             for px in top..self.u.ncols() {
                 let j = self.xj[px as usize];
@@ -1285,8 +1287,9 @@ impl<F: Field> Gplu<F> {
     /// Perform a forward solution of the eqn x * U = sparse_row
     ///
     /// Helper function of gplu_row().
-    /// The solution is scattered in the member variable x, and its pattern is given in xj[top..ncols],
-    /// where top is the return value and xj is a member variable of self and has length ncols (e.g. taken from u).
+    /// We take even member variables as argument as we sometimes (e.g. in the parallel back substitution) want to use other vectors.
+    /// The solution is scattered in the dense vector x, and its pattern is given in xj[top..ncols],
+    /// where top is the return value.
     /// The precise semantics is as follows. Define
     ///    x_a = { j in [0..ncols] : pivots[j] == None }
     ///    x_b = { j in [0..ncols] : pivots[j] == Some(_) }
@@ -1297,23 +1300,25 @@ impl<F: Field> Gplu<F> {
     /// # Arguments
     /// * `values` - The non-zero values of the sparse row on the RHS of the equation.
     /// * `col_idcs` - The column indices of the non-zero values of the sparse row on the RHS of the equation.
-    fn sparse_forward_solve(&mut self, values : &[F::Element], col_idcs : &[u32]) -> u32 {
+    /// * `u`, `pivots`, `x`, `xj`, `pstack`, `marks` - Objects that are or correspond to the member variables of Gplu with the same names
+    fn sparse_forward_solve(values : &[F::Element], col_idcs : &[u32], u : &SparseMatrix<F>, pivots : &Vec<Option<u32>>, x : &mut Vec<F::Element>,
+                            xj : &mut Vec<u32>, pstack : &mut Vec<u32>, marks : &mut Vec<bool>) -> u32 {
         //compute non-zero pattern of x
-        let top = self.reach(&col_idcs);
+        let top = Gplu::reach(&col_idcs, &u, &pivots, xj, pstack, marks);
 
         //clear x and copy sparse_row into x, i.e. x = sparse_row
-        for px in top..self.u.ncols {
-            self.x[self.xj[px as usize] as usize] = self.u.field.zero();
+        for px in top..u.ncols {
+            x[xj[px as usize] as usize] = u.field.zero();
         }
         for (col_idx, val) in col_idcs.iter().zip(values.iter()) {
-            self.x[*col_idx as usize] = val.clone();
+            x[*col_idx as usize] = val.clone();
         }
 
         //iterate over the precomputed pattern of x
-        for px in top..self.u.ncols() {
-            let j = self.xj[px as usize];//x[j] is generically nonzero (except for accidental numerical cancellations)
+        for px in top..u.ncols() {
+            let j = xj[px as usize];//x[j] is generically nonzero (except for accidental numerical cancellations)
             //locate corresponding pivot if there is any
-            let i = self.pivots[j as usize];
+            let i = pivots[j as usize];
 
             if i.is_none() {
                 continue;
@@ -1321,14 +1326,14 @@ impl<F: Field> Gplu<F> {
 
             let i = i.unwrap();
             //the pivot on row i is 1, so we just have to multiply by -x[j]
-            let backup = self.x[j as usize].clone();
+            let backup = x[j as usize].clone();
 
-            let start = self.u.row_idcs[i as usize];
-            let end = self.u.row_idcs[(i + 1) as usize];
-            let beta = self.u.field.neg(&self.x[j as usize]);
-            Gplu::scatter(&mut self.x, &beta, &self.u.values[start..end], &self.u.col_idcs[start..end], &self.u.field);
-            debug_assert!(self.u.field.is_zero(&self.x[j as usize]));
-            self.x[j as usize] = backup;
+            let start = u.row_idcs[i as usize];
+            let end = u.row_idcs[(i + 1) as usize];
+            let beta = u.field.neg(&x[j as usize]);
+            Gplu::scatter(x, &beta, &u.values[start..end], &u.col_idcs[start..end], &u.field);
+            debug_assert!(u.field.is_zero(&x[j as usize]));
+            x[j as usize] = backup;
         }
 
         top
@@ -1338,24 +1343,25 @@ impl<F: Field> Gplu<F> {
     ///
     /// Helper function of sparse_forward_solve().
     ///
-    /// The member variables xj, pstack, and marks of self must be of size u.ncols and zeroed out the first time this function is called.
+    /// The variables xj, pstack, and marks of self must be of size u.ncols and zeroed out the first time this function is called.
     /// On output, the set of reachable columns is written in xj[top..u.ncols], where top is the return value.
     /// xj, pstack, and marks remain in a usable state for further calls of this function ond doesn't need to be zeroed out.
     /// # Arguments
     /// * `col_idcs` - The column indices of the non-zero values of the sparse row on the RHS of the equation.
-    fn reach(&mut self, col_idcs : &[u32]) -> u32 {
-        let mut top = self.u.ncols();
+    /// * `u`, `pivots`, `xj`, `pstack`, `marks` - Objects that are or correspond to the member variables of Gplu with the same names
+    fn reach(col_idcs : &[u32], u : &SparseMatrix<F>, pivots : &Vec<Option<u32>>, xj : &mut Vec<u32>, pstack : &mut Vec<u32>, marks : &mut Vec<bool>) -> u32 {
+        let mut top = u.ncols();
 
 	    //iterate over the kth row of mat. For each column index j present in mat[k] check if j is in the pattern
     	//(i.e. if it's marked). If not, start a DFS from j and add to the pattern all columns reachable from j
         for j in col_idcs {
-	        if !self.marks[*j as usize] {
-    	        top = self.dfs(*j, top);
+	        if !marks[*j as usize] {
+    	        top = Gplu::dfs(*j, top, &u, &pivots, xj, pstack, marks);
         	}
 	    }
     	//unmark all marked nodes
-        for px in top..self.u.ncols() {
-            self.marks[self.xj[px as usize] as usize] = false;
+        for px in top..u.ncols() {
+            marks[xj[px as usize] as usize] = false;
 	    }
         top
     }
@@ -1367,27 +1373,29 @@ impl<F: Field> Gplu<F> {
     /// The traversal starts at col_start.
     ///
     /// At the end, the list of traversed nodes is in xj[top..u.ncols], where top is the return value.
-    fn dfs(&mut self, jstart : u32, mut top : u32) -> u32 {
+    /// # Arguments
+    /// * `u`, `pivots`, `xj`, `pstack`, `marks` - Objects that are or correspond to the member variables of Gplu with the same names
+    fn dfs(jstart : u32, mut top : u32, u : &SparseMatrix<F>, pivots : &Vec<Option<u32>>, xj : &mut Vec<u32>, pstack : &mut Vec<u32>, marks : &mut Vec<bool>) -> u32 {
         //initialize the recursion stack (columns waiting to be traversed)
         //he stack is held at the beginning of xj, and has 'head' elements
         let mut head : u32 = 0;
-        self.xj[head as usize] = jstart;
+        xj[head as usize] = jstart;
 
         loop {
             //get j from the top of the recursion stack
-            let j = self.xj[head as usize];
-            let i = self.pivots[j as usize];
+            let j = xj[head as usize];
+            let i = pivots[j as usize];
 
-            if !self.marks[j as usize] {
+            if !marks[j as usize] {
                 //mark column j as seen and initialize pstack. This is done only once
-                self.marks[j as usize] = true;
-                self.pstack[head as usize] = 0;
+                marks[j as usize] = true;
+                pstack[head as usize] = 0;
             }
 
             if i.is_none() {
                 //push initial column in the output stack and pop out from the recursion stack
                 top -= 1;
-                self.xj[top as usize] = self.xj[head as usize];
+                xj[top as usize] = xj[head as usize];
                 if head == 0 {
                     break;
                 }//else
@@ -1398,28 +1406,28 @@ impl<F: Field> Gplu<F> {
             let i = i.unwrap();
 
             //size of row i
-            let row_weight_i = self.u.row_weight(i);
+            let row_weight_i = u.row_weight(i);
 
             //examine all yet-unseen entries of row i
-            let mut k : u32 = self.pstack[head as usize];
+            let mut k : u32 = pstack[head as usize];
             while k < row_weight_i {
-                let px = self.u.row_idcs[i as usize] + (k as usize);
-                let j2 = self.u.col_idcs[px];
-                if self.marks[j2 as usize] {
+                let px = u.row_idcs[i as usize] + (k as usize);
+                let j2 = u.col_idcs[px];
+                if marks[j2 as usize] {
                     //step
                     k += 1;
                     continue;
                 }
                 //interrupt the enumeration of entries of row i and start DFS from column j2
-                self.pstack[head as usize] = k + 1;
+                pstack[head as usize] = k + 1;
                 head += 1;
-                self.xj[head as usize] = j2;
+                xj[head as usize] = j2;
                 break;
             }
             if k == row_weight_i {
                 //row i fully examined; push initial column in the output stack and pop it from the recursion stack
                 top -= 1;
-                self.xj[top as usize] = self.xj[head as usize];
+                xj[top as usize] = xj[head as usize];
                 if head == 0 {
                     break;
                 }
@@ -1446,6 +1454,101 @@ impl<F: Field> Gplu<F> {
     }
 }
 
+
+impl<F: Field + Sync> Gplu<F>
+where F::Element: Sync + Send {
+    /// Applies backsubstitution to the U matrix to bring it into reversed RREF form (i.e. U will be in lower right triangular form).
+    ///
+    /// We do not keep track of the L matrix, so GpluLMode will be set to `None` and the L matrix will be emptied.
+    /// This version employs a parallel algorithm, which though in total does more work than the serial version.
+    pub fn back_substitution_parallel(&mut self) -> () {
+        //erase L if necessary
+        match self.mode {
+            GpluLMode::Full | GpluLMode::Pattern => {
+                self.l.values.clear();
+                self.l.col_idcs.clear();
+                self.l.row_idcs.clear();
+                self.l.row_idcs.push(0);
+                self.l.nrows = 0;
+                self.l.ncols = 0;
+                self.mode = GpluLMode::None;
+            },
+            GpluLMode::None => () //nothing to be done
+        }
+        
+        //we need some local objects for each thread: pivots, x, xj, pstack, marks
+        let new_rows : Vec<_> = self.pivots.par_iter().enumerate().rev().filter_map(|(col_idx, opt)| opt.as_ref().map(|val| (col_idx, val))).map_init(
+            || {(
+                //create the local versions of pivots, x, xj, pstack, marks
+                self.pivots.clone(),
+                vec![self.u.field.one(); self.u.ncols as usize],
+                vec![0; self.u.ncols as usize],
+                vec![0; self.u.ncols as usize],
+                vec![false; self.u.ncols as usize],
+            )},
+            |(pivots, x, xj, pstack, marks), (col_idx, row) | {
+                //remove the pivot on the row we are acting on from the local pivots
+                pivots[col_idx] = None;
+                
+                let start = self.u.row_idcs[*row as usize];
+                let end = self.u.row_idcs[(row + 1) as usize];
+                let top = Gplu::sparse_forward_solve(&self.u.values[start..end], &self.u.col_idcs[start..end], &self.u, pivots, x, xj, pstack, marks);
+
+                //reset the pivot in the local pivots
+                pivots[col_idx] = Some(*row);
+
+                //collet col_idcs and values of new row in a single vector
+                let mut new_row : Vec<(u32, F::Element)> = Vec::new();
+
+                //put the pivot first
+                new_row.push((col_idx as u32, self.u.field.one()));
+
+                //send the remaining non-pivots into the new row
+                let beta = self.u.field.inv(&x[col_idx]);
+                for px in top..self.u.ncols() {
+                    let j = xj[px as usize];
+                    if pivots[j as usize].is_none() {
+                        let val = self.u.field.mul(&x[j as usize], &beta);
+                        if !self.u.field.is_zero(&val) {
+                            new_row.push((j,val));
+                        }
+                    }
+                }
+                
+                //sort
+                new_row.sort_unstable_by_key(|(col, _)| *col);
+                //return
+                new_row
+                
+            }
+        ).collect();
+
+        debug_assert_eq!(new_rows.len(),self.u.nrows as usize);
+
+        //move into u
+        self.u.values.clear();
+        self.u.col_idcs.clear();
+        self.u.row_idcs.clear();
+
+        //count elements
+        let total_vals : usize = new_rows.iter().map(|row| row.len()).sum();
+
+        self.u.values.reserve(total_vals);
+        self.u.col_idcs.reserve(total_vals);
+        self.u.row_idcs.reserve(new_rows.len() + 1);
+        
+        self.u.row_idcs.push(0);
+        for row in new_rows.into_iter() {
+            for (col_idx, val) in row.into_iter() {
+                self.u.values.push(val);
+                self.u.col_idcs.push(col_idx);
+            }
+            self.u.row_idcs.push(self.u.values.len());
+        }
+        
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::domains::{
@@ -1456,14 +1559,21 @@ mod tests {
     use crate::tensors::sparse::{SparseMatrix, SparseVector, Gplu, GpluLMode};
 
     #[test]
-    fn random_gplu() {
-        let mat = SparseMatrix::<FractionField<IntegerRing>>::random(500, 500, 500);
+    fn random_gplu_backsubs() {
+        let mat = SparseMatrix::<FractionField<IntegerRing>>::random(100, 100, 100);
 
-        let gplu = Gplu::from_matrix(&mat, GpluLMode::Full);
+        let mut gplu = Gplu::from_matrix(&mat, GpluLMode::Full);
 
         //check L.U == A (also checking multiplication and subtraction)
         assert_eq!(&(gplu.l() * gplu.u()), &mat);
         assert_eq!(&(gplu.l() * gplu.u()) - &mat, SparseMatrix::new(mat.nrows(), mat.ncols(), FractionField::new(IntegerRing::new())));
+
+        let mut gplu2 = gplu.clone();
+
+        //check the two versions of back_substitution against each other
+        gplu.back_substitution();
+        gplu2.back_substitution_parallel();
+        assert_eq!(gplu.u(), gplu2.u());
     }
 
     #[test]
