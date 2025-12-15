@@ -558,6 +558,49 @@ impl<F: Field> SparseMatrix<F> {
     }
 }
 
+impl<F: Field + Sync> SparseMatrix<F>
+where F::Element: Sync + Send {
+    /// Solve the linear system `A * x = b`, where `A` is `self` using the Gplu algorithm.
+    /// The back substitution uses parallelized code.
+    pub fn solve_parallel(mut self, b : SparseVector<F>) -> Result<SparseVector<F>, SparseMatrixError<F>> {
+        if self.nrows() != b.len() {
+            return Err(SparseMatrixError::ShapeMismatch);
+        }
+        if self.field != b.field {
+            return Err(SparseMatrixError::FieldMismatch);
+        }
+
+        let nvars = self.ncols;
+        // append b as the last column
+		self.append_col(b);
+
+        //perform gplu
+        let gplu = Gplu::from_matrix_checked(&self, GpluLMode::None);
+
+        if gplu.is_none() {
+            return Err(SparseMatrixError::Inconsistent)
+        }
+
+        let mut gplu = gplu.unwrap();
+
+        //check for underdeterminedness
+        // rank < nvars
+		if gplu.u.nrows() < nvars {
+            return Err(SparseMatrixError::Underdetermined {
+                rank : gplu.u.nrows() as usize,
+                row_reduced_augmented_matrix : gplu.u
+            });
+        }
+
+        //go to actual rref form
+        gplu.back_substitution_parallel();
+
+        //solution is the reversed last column of U
+        Ok(gplu.u.last_column_rev())
+    }
+}
+
+
 impl SparseMatrix<FractionField<IntegerRing>> {
     /// Generate a random SparseMatrix with the given dimensions and number of entries
     pub fn random(nrows : u32, ncols : u32, nentries : usize) -> Self {
