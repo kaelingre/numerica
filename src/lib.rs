@@ -40,4 +40,3 @@ pub mod numerical_integration;
 pub mod printer;
 pub mod tensors;
 pub mod utils;
-pub mod rational_reconstruction;
