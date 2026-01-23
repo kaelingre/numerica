@@ -1481,11 +1481,12 @@ impl<F: Field> Gplu<F> {
             self.pivots[pivot as usize] = Some(self.nrows - self.defficiency);
 
             //fill in U
-            //we first collect in vector to sort them before actually inserting
-            let mut new_row: Vec<(u32, F::Element)> = Vec::new();
+            //first sort the columns to have them sorted when inserting
+            self.xj[top as usize..].sort_unstable();
 
             //pivot must be the first entry in U[i]
-            new_row.push((pivot, self.u.field.one()));
+            self.u.col_idcs.push(pivot);
+            self.u.values.push(self.u.field.one());
 
             //send the remaining non-pivot coefficients into new row
             let beta = self.u.field.inv(&self.x[pivot as usize]);
@@ -1495,19 +1496,10 @@ impl<F: Field> Gplu<F> {
                 if self.pivots[j as usize].is_none() {
                     let val = self.u.field.mul(&self.x[j as usize], &beta);
                     if !self.u.field.is_zero(&val) {
-                        new_row.push((j, val));
+                        self.u.col_idcs.push(j);
+                        self.u.values.push(val);
                     }
                 }
-            }
-
-            //sort
-            new_row.sort_unstable_by_key(|(col, _)| *col);
-            //move into actual U
-            self.u.values.reserve(new_row.len());
-            self.u.col_idcs.reserve(new_row.len());
-            for (col, val) in new_row {
-                self.u.col_idcs.push(col);
-                self.u.values.push(val);
             }
 
             //finish the new row in U
@@ -1660,7 +1652,7 @@ impl<F: Field> Gplu<F> {
         pstack: &mut Vec<u32>,
         marks: &mut Vec<bool>,
     ) -> u32 {
-        //initialize the recursion stack (columns waiting to be traversed)
+        //initialize the 61;8203;1crecursion stack (columns waiting to be traversed)
         //he stack is held at the beginning of xj, and has 'head' elements
         let mut head: u32 = 0;
         xj[head as usize] = jstart;
@@ -1804,7 +1796,7 @@ where
                     //reset the pivot in the local pivots
                     pivots[col_idx] = Some(*row);
 
-                    //collet col_idcs and values of new row in a single vector
+                    //collect col_idcs and values of new row in a single vector
                     let mut new_row: Vec<(u32, F::Element)> = Vec::new();
 
                     //put the pivot first
