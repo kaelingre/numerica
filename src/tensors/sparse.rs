@@ -208,6 +208,8 @@ pub enum SparseMatrixError<F: Ring> {
     FieldMismatch,
     /// No solution exists
     Inconsistent,
+    /// The matrix is not square
+    NotSquare,
     /// System is underdetermined (infinite solutions)
     Underdetermined {
         rank: usize,
@@ -807,6 +809,43 @@ impl<F: Field> SparseMatrix<F> {
         //solution is the reversed last column of U
         Ok(gplu.u.last_column_rev())
     }
+
+    /// Compute the determinant of the matrix
+    pub fn det(&self) -> Result<F::Element, SparseMatrixError<F>> {
+        if self.nrows != self.ncols {
+            Err(SparseMatrixError::NotSquare)?;
+        }
+        
+        let gplu = Gplu::from_matrix_check_dependent(self, GpluLMode::Full);
+
+        if gplu.is_none() {
+            //has a vanishing row, must be zero
+            return Ok(self.field.zero());
+        }
+
+        let gplu = gplu.unwrap();
+
+        //take the product of all the diagonal entries of L (are guaranteed to be last in the row)
+        let mut det = self.field.one();
+        for row in 0..gplu.l.nrows {
+            //use "pivot-last" property
+            self.field.mul_assign(&mut det, &gplu.l.values[gplu.l.row_idcs[(row+1) as usize] - 1]);
+        }
+        //we also need the sign of the permutation of rows that would sort them (according to pivot)
+        let mut inversions = 0;
+        for i in 0..gplu.pivots.len() {
+            for j in i+1..gplu.pivots.len() {
+                if gplu.pivots[i].unwrap() > gplu.pivots[j].unwrap() {
+                    inversions += 1;
+                }
+            }
+        }
+        if inversions % 2 == 1 {
+            det = self.field.neg(det);
+        }
+
+        Ok(det)
+    }
 }
 
 impl<F: Field + Sync + Send> SparseMatrix<F>
@@ -867,8 +906,8 @@ impl SparseMatrix<FractionField<IntegerRing>> {
         let mut pairs: HashSet<(u32, u32)> = HashSet::with_capacity(nentries);
         while pairs.len() < nentries {
             pairs.insert((
-                rng.random_range(0..(nrows - 1)),
-                rng.random_range(0..(ncols - 1)),
+                rng.random_range(0..nrows),
+                rng.random_range(0..ncols),
             ));
         }
 
@@ -1299,7 +1338,7 @@ impl<F: Field> Gplu<F> {
         ret
     }
 
-    /// Construct a new Gplu decomposer that immediately decomposes the given matrix and checks if for consistency.
+    /// Construct a new Gplu decomposer that immediately decomposes the given matrix and checks for consistency at each step.
     ///
     /// Checking for consistency means that we return None whenever a new row in `U` is all zero except the last entry.
     /// The idea is that we decompose the matrix `(A|b)` for solving the system `A * x = b`, which becomes unsolvable in this case.
@@ -1327,6 +1366,28 @@ impl<F: Field> Gplu<F> {
                     //row has only one entry and it's on the last column
                     return None;
                 }
+            }
+        }
+
+        Some(ret)
+    }
+
+    /// Construct a new Gplu decomposer that immediately decomposes the given matrix and stops when a linearly dependent row is found.
+    ///
+    /// Checking for consistency means that we return None whenever a new row in `U` is all zero except the last entry.
+    /// The idea is that we decompose the matrix `(A|b)` for solving the system `A * x = b`, which becomes unsolvable in this case.
+    pub fn from_matrix_check_dependent(mat: &SparseMatrix<F>, mode: GpluLMode) -> Option<Gplu<F>> {
+        let mut ret = Gplu {
+            u: SparseMatrix::new(0, mat.ncols(), mat.field().clone()),
+            l: SparseMatrix::new(0, 0, mat.field().clone()),
+            pivots: vec![None; mat.ncols() as usize],
+            mode: mode,
+            scratch: GpluScratch::new(mat.ncols(), mat.field())
+        };
+
+        for pair in mat.row_idcs.windows(2) {
+            if ret.gplu_row(&mat.values[pair[0]..pair[1]], &mat.col_idcs[pair[0]..pair[1]]).is_none() {
+                return None;
             }
         }
 
@@ -2060,8 +2121,6 @@ mod tests {
     use crate::tensors::matrix::Matrix;
     use crate::tensors::sparse::{Gplu, GpluLMode, SparseMatrix, SparseVector};
 
-    use std::time::Instant;
-
     #[test]
     fn dense_to_sparse() {
         let a = Matrix::from_linear(
@@ -2297,5 +2356,17 @@ mod tests {
             ),
             Err(_) => assert!(false),
         }
+    }
+
+    #[test]
+    fn random_det() {
+        //compare sparse to dense algorithm
+        let mat = SparseMatrix::<Q>::random(10, 10, 80);
+        let mat2 = mat.to_dense();
+
+        let det1 = mat.det();
+        let det2 = mat2.det();
+        
+        assert_eq!(det1.unwrap(), det2.unwrap());
     }
 }
