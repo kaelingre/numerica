@@ -215,6 +215,8 @@ pub enum SparseMatrixError<F: Ring> {
         rank: usize,
         row_reduced_augmented_matrix: SparseMatrix<F>,
     },
+    /// Singular, non-invertible
+    Singular
 }
 
 /// A sparse matrix in compressed sparse row (CSR) format.
@@ -462,6 +464,18 @@ impl<F: Ring> SparseMatrix<F> {
         ret
     }
 
+    /// Create a new square matrix with `nrows` rows and ones on the main diagonal and zeroes elsewhere.
+    pub fn identity(nrows: u32, field: F) -> SparseMatrix<F> {
+        SparseMatrix {
+            values: vec![field.one(); nrows as usize],
+            col_idcs: (0..nrows).collect(),
+			row_idcs: (0..(nrows + 1) as usize).collect(),
+            nrows: nrows,
+            ncols: nrows,
+            field: field
+        }
+    }
+
     /// Return the number of rows.
     pub fn nrows(&self) -> u32 {
         self.nrows as u32
@@ -547,8 +561,8 @@ impl<F: Ring> SparseMatrix<F> {
         let old_values = std::mem::take(&mut self.values);
         let old_col_idcs = std::mem::take(&mut self.col_idcs);
 
-        let mut new_values = Vec::with_capacity(old_values.len() + col.values.len());
-        let mut new_col_idcs = Vec::with_capacity(old_col_idcs.len() + col.idcs.len());
+        self.values = Vec::with_capacity(old_values.len() + col.values.len());
+        self.col_idcs = Vec::with_capacity(old_col_idcs.len() + col.idcs.len());
 
         let mut old_values_iter = old_values.into_iter();
         let mut old_col_idcs_iter = old_col_idcs.into_iter();
@@ -562,11 +576,11 @@ impl<F: Ring> SparseMatrix<F> {
             let row_len = row_end - row_start;
 
             // update row_idcs
-            self.row_idcs[row] = new_values.len();
+            self.row_idcs[row] = self.values.len();
 
             // move old values
-            new_values.extend(old_values_iter.by_ref().take(row_len));
-            new_col_idcs.extend(old_col_idcs_iter.by_ref().take(row_len));
+            self.values.extend(old_values_iter.by_ref().take(row_len));
+            self.col_idcs.extend(old_col_idcs_iter.by_ref().take(row_len));
 
             // move value from new column
             if current_col
@@ -574,17 +588,88 @@ impl<F: Ring> SparseMatrix<F> {
                 .map_or(false, |&(idx, _)| idx as usize == row)
             {
                 let (_, val) = current_col.take().unwrap();
-                new_values.push(val);
-                new_col_idcs.push(self.ncols);
+                self.values.push(val);
+                self.col_idcs.push(self.ncols);
                 current_col = col_iter.next();
             }
         }
         //update after-the-end
-        self.row_idcs[self.nrows as usize] = new_values.len();
+        self.row_idcs[self.nrows as usize] = self.values.len();
 
-        self.values = new_values;
-        self.col_idcs = new_col_idcs;
         self.ncols += 1;
+    }
+
+    /// For a square matrix, it will append the identity matrix to the right.
+    ///
+    /// I.e. A -> (A|I).
+    pub fn append_identity(&mut self) -> () {
+        assert_eq!(self.ncols, self.nrows);
+        let n = self.ncols;
+        let old_values = std::mem::take(&mut self.values);
+        let old_col_idcs = std::mem::take(&mut self.col_idcs);
+
+        self.values = Vec::with_capacity(old_values.len() + (n as usize));
+        self.col_idcs = Vec::with_capacity(old_col_idcs.len() + (n as usize));
+
+        let mut old_values_iter = old_values.into_iter();
+        let mut old_col_idcs_iter = old_col_idcs.into_iter();
+
+        for row in 0..n as usize {
+            let start = self.row_idcs[row];
+            let end = self.row_idcs[row + 1];
+            let row_len = end - start;
+
+            //update row_idcs
+            self.row_idcs[row] = self.values.len();
+
+            //move old values
+            self.values.extend(old_values_iter.by_ref().take(row_len));
+            self.col_idcs.extend(old_col_idcs_iter.by_ref().take(row_len));
+
+            //push the new 1 in this row
+            self.values.push(self.field.one());
+            self.col_idcs.push(n + (row as u32));
+        }
+        //update after-the-end
+        self.row_idcs[n as usize] = self.values.len();
+
+        self.ncols += n;
+    }
+
+    /// Returns the row-reversed right half of the matrix.
+    ///
+    /// The number of rows needs to be divisible by two.
+    /// E.g. 2n x n matrix (A|B) -> rev(B), where rev means that the row ordering has been reversed
+    pub(crate) fn take_rev_right_half(&mut self) -> () {
+        assert!(self.ncols % 2 == 0);
+        let n = self.ncols / 2;
+        let mut old_values = std::mem::take(&mut self.values);
+        let old_col_idcs = std::mem::take(&mut self.col_idcs);
+        let old_row_idcs = std::mem::take(&mut self.row_idcs);
+
+        //very conservative allocation
+        self.values = Vec::new();
+        self.col_idcs = Vec::new();
+        self.row_idcs = Vec::new();
+
+        for row in (0..self.nrows as usize).rev() {
+            let start = old_row_idcs[row];
+            let end = old_row_idcs[row + 1];
+
+            //update row_idcs
+            self.row_idcs.push(self.values.len());
+
+            for px in start..end {
+                let col_idx = old_col_idcs[px];
+                if col_idx >= n {
+                    self.values.push(std::mem::replace(&mut old_values[px], self.field.zero()));
+                    self.col_idcs.push(col_idx - n);
+                }
+            }
+        }
+        //set after-the-end
+        self.row_idcs.push(self.values.len());
+        self.ncols = n;
     }
 
     /// Return the number of non-zero entries in the given row.
@@ -810,7 +895,7 @@ impl<F: Field> SparseMatrix<F> {
         Ok(gplu.u.last_column_rev())
     }
 
-    /// Compute the determinant of the matrix
+    /// Compute the determinant of the matrix.
     pub fn det(&self) -> Result<F::Element, SparseMatrixError<F>> {
         if self.nrows != self.ncols {
             Err(SparseMatrixError::NotSquare)?;
@@ -845,6 +930,32 @@ impl<F: Field> SparseMatrix<F> {
         }
 
         Ok(det)
+    }
+
+    /// Compute the inverse of the matrix.
+    pub fn inv(&self) -> Result<Self, SparseMatrixError<F>> {
+        if self.nrows != self.ncols {
+            Err(SparseMatrixError::NotSquare)?;
+        }
+        //need a copy of self
+        let mut mat = self.clone();
+        mat.append_identity();
+
+        let gplu = Gplu::from_matrix_check_dependent(&mat, GpluLMode::Full);
+
+        if gplu.is_none() {
+            //not invertible
+            return Err(SparseMatrixError::Singular)?;
+        }
+
+        let mut gplu = gplu.unwrap();
+
+        gplu.back_substitution();
+
+        //extract the right half of the matrix
+        gplu.u.take_rev_right_half();
+        
+        Ok(gplu.u)
     }
 }
 
@@ -2359,7 +2470,7 @@ mod tests {
     }
 
     #[test]
-    fn random_det() {
+    fn sparse_det_random() {
         //compare sparse to dense algorithm
         let mat = SparseMatrix::<Q>::random(10, 10, 80);
         let mat2 = mat.to_dense();
@@ -2368,5 +2479,28 @@ mod tests {
         let det2 = mat2.det();
         
         assert_eq!(det1.unwrap(), det2.unwrap());
+    }
+
+    #[test]
+    fn sparse_inv() {
+        // sparse 5x5 matrix triplets
+        let triplets = vec![
+            // row, col, entry
+            (0, 0, 1.into()),
+            (0, 2, 2.into()),
+            (1, 1, 1.into()),
+            (1, 3, 3.into()),
+            (2, 2, 1.into()),
+            (2, 4, 4.into()),
+            (3, 3, 1.into()),
+            (4, 0, 2.into()),
+            (4, 4, 1.into()),
+        ];
+
+        let mat = SparseMatrix::from_triplets(5, 5, triplets, Q);
+
+        let inv = mat.inv().unwrap();
+
+        assert_eq!(&mat * &inv, SparseMatrix::identity(5, Q));
     }
 }
