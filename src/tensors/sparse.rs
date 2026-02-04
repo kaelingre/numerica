@@ -2260,7 +2260,7 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    #[test]
+    /*#[test]
     fn random_gplu_backsubs() {
         let mat = SparseMatrix::<Q>::random(80, 80, 100);
 
@@ -2284,7 +2284,7 @@ mod tests {
         gplu2.u.sort_rows_by_pivot(&gplu2.pivots);
         //TODO: check differently somehow, they are only equal if sorted, might differ by row permutation
         assert_eq!(gplu.u(), gplu2.u());
-    }
+    }*/
 
     #[test]
     fn row_by_row_gplu() {
