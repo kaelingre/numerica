@@ -1622,9 +1622,6 @@ impl<F: Field> Gplu<F> {
             let leading_coeff = &values[0];
             let leading_coeff_inv = self.u.field.inv(&leading_coeff);
             self.u.nrows += 1;
-            self.u
-                .row_idcs
-                .push(self.u.row_idcs.last().unwrap() + values.len());
             self.u.col_idcs.extend_from_slice(&col_idcs);
             if self.u.field.is_one(&leading_coeff_inv) {
                 self.u.values.extend_from_slice(&values);
@@ -1635,6 +1632,7 @@ impl<F: Field> Gplu<F> {
                         .map(|val| self.u.field.mul(val, &leading_coeff_inv)),
                 );
             }
+            self.u.row_idcs.push(self.u.values.len());
 
             //also compute L if wanted
             match self.mode {
@@ -1807,8 +1805,6 @@ impl<F: Field> Gplu<F> {
             let leading_coeff = &values[0];
             let leading_coeff_inv = self.u.field.inv(&leading_coeff);
             mat.nrows += 1;
-            mat.row_idcs
-                .push(self.u.row_idcs.last().unwrap() + values.len());
             mat.col_idcs.extend_from_slice(&col_idcs);
             if self.u.field.is_one(&leading_coeff_inv) {
                 mat.values.extend_from_slice(&values);
@@ -1819,6 +1815,7 @@ impl<F: Field> Gplu<F> {
                         .map(|val| self.u.field.mul(val, &leading_coeff_inv)),
                 );
             }
+            mat.row_idcs.push(mat.values.len());
 
             return Some(pivot_col);
         }
