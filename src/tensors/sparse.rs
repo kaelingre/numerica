@@ -17,7 +17,7 @@ use std::{
     collections::HashSet,
     fmt::Display,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
-    cell::UnsafeCell
+    sync::Mutex,
 };
 
 use itertools::Itertools;
@@ -25,7 +25,6 @@ use itertools::Itertools;
 use rand::Rng;
 
 use rayon::prelude::*;
-use rayon::current_thread_index;
 
 use crate::{
     domains::{
@@ -36,23 +35,6 @@ use crate::{
     printer::{PrintOptions, PrintState},
     tensors::matrix::Matrix,
 };
-
-/// A sync version of UnsafeCell
-struct SyncUnsafeCell<T>(UnsafeCell<T>);
-
-unsafe impl<T: Send> Sync for SyncUnsafeCell<T> {}
-
-impl<T> SyncUnsafeCell<T> {
-    /// Create e new SyncUnsafeCell carrying the given value
-    fn new(value: T) -> Self {
-        Self(UnsafeCell::new(value))
-    }
-
-    /// Get back the stored value
-    fn get(&self) -> *mut T {
-        self.0.get()
-    }
-}
 
 /// A sparse vector in a compressed format (compressed sparse row style).
 ///
@@ -216,7 +198,7 @@ pub enum SparseMatrixError<F: Ring> {
         row_reduced_augmented_matrix: SparseMatrix<F>,
     },
     /// Singular, non-invertible
-    Singular
+    Singular,
 }
 
 /// A sparse matrix in compressed sparse row (CSR) format.
@@ -469,10 +451,10 @@ impl<F: Ring> SparseMatrix<F> {
         SparseMatrix {
             values: vec![field.one(); nrows as usize],
             col_idcs: (0..nrows).collect(),
-			row_idcs: (0..(nrows + 1) as usize).collect(),
+            row_idcs: (0..(nrows + 1) as usize).collect(),
             nrows: nrows,
             ncols: nrows,
-            field: field
+            field: field,
         }
     }
 
@@ -580,7 +562,8 @@ impl<F: Ring> SparseMatrix<F> {
 
             // move old values
             self.values.extend(old_values_iter.by_ref().take(row_len));
-            self.col_idcs.extend(old_col_idcs_iter.by_ref().take(row_len));
+            self.col_idcs
+                .extend(old_col_idcs_iter.by_ref().take(row_len));
 
             // move value from new column
             if current_col
@@ -624,7 +607,8 @@ impl<F: Ring> SparseMatrix<F> {
 
             //move old values
             self.values.extend(old_values_iter.by_ref().take(row_len));
-            self.col_idcs.extend(old_col_idcs_iter.by_ref().take(row_len));
+            self.col_idcs
+                .extend(old_col_idcs_iter.by_ref().take(row_len));
 
             //push the new 1 in this row
             self.values.push(self.field.one());
@@ -662,7 +646,8 @@ impl<F: Ring> SparseMatrix<F> {
             for px in start..end {
                 let col_idx = old_col_idcs[px];
                 if col_idx >= n {
-                    self.values.push(std::mem::replace(&mut old_values[px], self.field.zero()));
+                    self.values
+                        .push(std::mem::replace(&mut old_values[px], self.field.zero()));
                     self.col_idcs.push(col_idx - n);
                 }
             }
@@ -715,17 +700,18 @@ impl<F: Ring> SparseMatrix<F> {
     ///
     /// # Arguments
     /// * `pivots` - The pivot positions for each column, i.e. there is a pivot on column j and row pivots[j].
-    pub fn last_column_by_pivot(self, pivots : &Vec<Option<u32>>) -> SparseVector<F> {
+    pub fn last_column_by_pivot(self, pivots: &Vec<Option<u32>>) -> SparseVector<F> {
         let mut values = self.values;
         let mut ret = SparseVector::new(self.nrows, self.field.clone());
         for (col, pivot) in pivots.iter().enumerate() {
             if let Some(row) = pivot {
                 let start = self.row_idcs[*row as usize];
-	            let end = self.row_idcs[(row + 1) as usize];
+                let end = self.row_idcs[(row + 1) as usize];
                 if end > start && self.col_idcs[end - 1] + 1 == self.ncols {
                     //last entry of this column is non zero
-                ret.idcs.push(col as u32);
-                ret.values.push(std::mem::replace(&mut values[end - 1], self.field.zero()));
+                    ret.idcs.push(col as u32);
+                    ret.values
+                        .push(std::mem::replace(&mut values[end - 1], self.field.zero()));
                 }
             }
         }
@@ -817,8 +803,8 @@ impl<F: Ring> SparseMatrix<F> {
 
         //get shift for the row indices
         let shift = self.values.len();
-        
-		//simply append values and col indices
+
+        //simply append values and col indices
         self.values.append(&mut other.values);
         self.col_idcs.append(&mut other.col_idcs);
 
@@ -833,7 +819,7 @@ impl<F: Ring> SparseMatrix<F> {
     ///
     /// # Arguments
     /// * `pivots` - The pivot positions for each column, i.e. there is a pivot on column j and row pivots[j].
-    pub fn sort_rows_by_pivot(&mut self, pivots : &Vec<Option<u32>>) {
+    pub fn sort_rows_by_pivot(&mut self, pivots: &Vec<Option<u32>>) {
         let mut new_values = Vec::with_capacity(self.values.len());
         let mut new_col_idcs = Vec::with_capacity(self.col_idcs.len());
         let mut new_row_idcs = Vec::with_capacity(self.row_idcs.len());
@@ -900,7 +886,7 @@ impl<F: Field> SparseMatrix<F> {
         if self.nrows != self.ncols {
             Err(SparseMatrixError::NotSquare)?;
         }
-        
+
         let gplu = Gplu::from_matrix_check_dependent(self, GpluLMode::Full);
 
         if gplu.is_none() {
@@ -914,12 +900,15 @@ impl<F: Field> SparseMatrix<F> {
         let mut det = self.field.one();
         for row in 0..gplu.l.nrows {
             //use "pivot-last" property
-            self.field.mul_assign(&mut det, &gplu.l.values[gplu.l.row_idcs[(row+1) as usize] - 1]);
+            self.field.mul_assign(
+                &mut det,
+                &gplu.l.values[gplu.l.row_idcs[(row + 1) as usize] - 1],
+            );
         }
         //we also need the sign of the permutation of rows that would sort them (according to pivot)
         let mut inversions = 0;
         for i in 0..gplu.pivots.len() {
-            for j in i+1..gplu.pivots.len() {
+            for j in i + 1..gplu.pivots.len() {
                 if gplu.pivots[i].unwrap() > gplu.pivots[j].unwrap() {
                     inversions += 1;
                 }
@@ -954,7 +943,7 @@ impl<F: Field> SparseMatrix<F> {
 
         //extract the right half of the matrix
         gplu.u.take_rev_right_half();
-        
+
         Ok(gplu.u)
     }
 }
@@ -1016,10 +1005,7 @@ impl SparseMatrix<FractionField<IntegerRing>> {
         //generate nentries unique coordinates
         let mut pairs: HashSet<(u32, u32)> = HashSet::with_capacity(nentries);
         while pairs.len() < nentries {
-            pairs.insert((
-                rng.random_range(0..nrows),
-                rng.random_range(0..ncols),
-            ));
+            pairs.insert((rng.random_range(0..nrows), rng.random_range(0..ncols)));
         }
 
         let f = FractionField::new(IntegerRing::new());
@@ -1367,7 +1353,7 @@ struct GpluScratch<F: Field> {
     /// Indicates which columns have been seen already in reach()/dfs()
     /// In spasm, this is part of the xj vector.
     /// It has length mat.ncols
-    marks: Vec<bool>
+    marks: Vec<bool>,
 }
 
 impl<F: Field> GpluScratch<F> {
@@ -1377,7 +1363,7 @@ impl<F: Field> GpluScratch<F> {
             x: vec![field.zero(); ncols as usize],
             xj: vec![0; ncols as usize],
             pstack: vec![0; ncols as usize],
-            marks: vec![false; ncols as usize]
+            marks: vec![false; ncols as usize],
         }
     }
 }
@@ -1410,7 +1396,7 @@ pub struct Gplu<F: Field> {
     mode: GpluLMode,
 
     /// Collection of some internal scratch data
-	scratch: GpluScratch<F>
+    scratch: GpluScratch<F>,
 }
 
 impl<F: Field> Gplu<F> {
@@ -1436,7 +1422,7 @@ impl<F: Field> Gplu<F> {
             l: SparseMatrix::new(0, 0, mat.field().clone()),
             pivots: vec![None; mat.ncols() as usize],
             mode: mode,
-            scratch: GpluScratch::new(mat.ncols(), mat.field())
+            scratch: GpluScratch::new(mat.ncols(), mat.field()),
         };
 
         for pair in mat.row_idcs.windows(2) {
@@ -1459,7 +1445,7 @@ impl<F: Field> Gplu<F> {
             l: SparseMatrix::new(0, 0, mat.field().clone()),
             pivots: vec![None; mat.ncols() as usize],
             mode: mode,
-            scratch: GpluScratch::new(mat.ncols(), mat.field())
+            scratch: GpluScratch::new(mat.ncols(), mat.field()),
         };
 
         for pair in mat.row_idcs.windows(2) {
@@ -1493,11 +1479,17 @@ impl<F: Field> Gplu<F> {
             l: SparseMatrix::new(0, 0, mat.field().clone()),
             pivots: vec![None; mat.ncols() as usize],
             mode: mode,
-            scratch: GpluScratch::new(mat.ncols(), mat.field())
+            scratch: GpluScratch::new(mat.ncols(), mat.field()),
         };
 
         for pair in mat.row_idcs.windows(2) {
-            if ret.gplu_row(&mat.values[pair[0]..pair[1]], &mat.col_idcs[pair[0]..pair[1]]).is_none() {
+            if ret
+                .gplu_row(
+                    &mat.values[pair[0]..pair[1]],
+                    &mat.col_idcs[pair[0]..pair[1]],
+                )
+                .is_none()
+            {
                 return None;
             }
         }
@@ -1562,7 +1554,9 @@ impl<F: Field> Gplu<F> {
         self.pivots = new_pivots;
 
         //update x
-        self.scratch.x.resize(self.u.ncols() as usize, self.u.field().zero());
+        self.scratch
+            .x
+            .resize(self.u.ncols() as usize, self.u.field().zero());
 
         //update xj, pstack, marks (make them all zero)
         self.scratch.xj.resize(self.u.ncols() as usize, 0);
@@ -1669,13 +1663,8 @@ impl<F: Field> Gplu<F> {
         }
 
         //triangular solve: x * U = mat[row]
-        let top = Gplu::sparse_forward_solve(
-            values,
-            col_idcs,
-            &self.u,
-            &self.pivots,
-            &mut self.scratch
-        );
+        let top =
+            Gplu::sparse_forward_solve(values, col_idcs, &self.u, &self.pivots, &mut self.scratch);
 
         //find pivot and dispatch coeffs into U
         let mut pivot: Option<u32> = None;
@@ -1786,7 +1775,13 @@ impl<F: Field> Gplu<F> {
     ///
     /// # Return
     /// The pivot column of the new row addad to mat if it was a linearly independent row.
-    fn gplu_row_virtual(&self, values: &[F::Element], col_idcs: &[u32], mat : &mut SparseMatrix<F>, scratch : &mut GpluScratch<F>) -> Option<u32> {
+    fn gplu_row_virtual(
+        &self,
+        values: &[F::Element],
+        col_idcs: &[u32],
+        mat: &mut SparseMatrix<F>,
+        scratch: &mut GpluScratch<F>,
+    ) -> Option<u32> {
         if self.u.nrows == self.u.ncols {
             //full rank reached
             return None;
@@ -1812,8 +1807,7 @@ impl<F: Field> Gplu<F> {
             let leading_coeff = &values[0];
             let leading_coeff_inv = self.u.field.inv(&leading_coeff);
             mat.nrows += 1;
-            mat
-                .row_idcs
+            mat.row_idcs
                 .push(self.u.row_idcs.last().unwrap() + values.len());
             mat.col_idcs.extend_from_slice(&col_idcs);
             if self.u.field.is_one(&leading_coeff_inv) {
@@ -1830,13 +1824,7 @@ impl<F: Field> Gplu<F> {
         }
 
         //triangular solve: x * U = mat[row]
-        let top = Gplu::sparse_forward_solve(
-            values,
-            col_idcs,
-            &self.u,
-            &self.pivots,
-            scratch
-        );
+        let top = Gplu::sparse_forward_solve(values, col_idcs, &self.u, &self.pivots, scratch);
 
         //find pivot and dispatch coeffs into U
         let mut pivot: Option<u32> = None;
@@ -1894,7 +1882,7 @@ impl<F: Field> Gplu<F> {
 
         None
     }
-    
+
     /// Perform a forward solution of the eqn x * U = sparse_row
     ///
     /// Helper function of gplu_row().
@@ -1920,7 +1908,14 @@ impl<F: Field> Gplu<F> {
         scratch: &mut GpluScratch<F>,
     ) -> u32 {
         //compute non-zero pattern of x
-        let top = Gplu::reach(&col_idcs, &u, &pivots, &mut scratch.xj, &mut scratch.pstack, &mut scratch.marks);
+        let top = Gplu::reach(
+            &col_idcs,
+            &u,
+            &pivots,
+            &mut scratch.xj,
+            &mut scratch.pstack,
+            &mut scratch.marks,
+        );
 
         //clear x and copy sparse_row into x, i.e. x = sparse_row
         for px in top..u.ncols {
@@ -2104,8 +2099,8 @@ impl<F: Field> Gplu<F> {
 
         for pivot in self.pivots.iter().rev() {
             if let Some(row) = pivot {
-                let mut max : u32 = 0;
-                for j in self.u.row_idcs[*row as usize]..self.u.row_idcs[(*row as usize)+1] {
+                let mut max: u32 = 0;
+                for j in self.u.row_idcs[*row as usize]..self.u.row_idcs[(*row as usize) + 1] {
                     let col_idx = self.u.col_idcs[j];
                     let pivot_row = self.pivots[col_idx as usize];
 
@@ -2165,45 +2160,55 @@ where
         //the gplu that we will use to build up the RREF form
         //will be moved into self at the end
         let mut gplu_ret = Gplu::new(self.u.ncols, self.u.field.clone(), GpluLMode::None);
-
-        //allocate re-usable scratch data (no way around unsafe code, but I promise I'm going to be careful!)
-        let num_threads = rayon::current_num_threads();
-        let thread_scratch: Vec<SyncUnsafeCell<GpluScratch<F>>> = (0..num_threads).map(|_| SyncUnsafeCell::new(GpluScratch::new(self.u.ncols, &self.u.field))).collect();
+        let scratch_pool = Mutex::new(vec![]);
 
         //we need some local objects for each thread: mat, pivots, scratch
         for level in level_sets {
             if level.is_empty() {
                 continue;
             }
-            let results : Vec<(SparseMatrix<F>, Vec<(u32, u32)>)> = level
+            let results: Vec<(SparseMatrix<F>, Vec<(u32, u32)>)> = level
                 .par_iter()
                 .fold(
                     || {
+                        let scratch = scratch_pool
+                            .lock()
+                            .unwrap()
+                            .pop()
+                            .unwrap_or_else(|| GpluScratch::new(self.u.ncols, &self.u.field));
+
                         (
                             //create the local versions of mat & pivots ("map" of col to row)
                             SparseMatrix::<F>::new(0, self.u.ncols, self.u.field.clone()),
-                            Vec::<(u32, u32)>::new(),                            
+                            Vec::<(u32, u32)>::new(),
+                            scratch,
                         )
-                    }, |(mut mat, mut pivots), &row | {
+                    },
+                    |(mut mat, mut pivots, mut scratch), &row| {
                         let start = self.u.row_idcs[row as usize];
                         let end = self.u.row_idcs[(row + 1) as usize];
-                        let thread_idx = current_thread_index().unwrap_or(0);
-                        let scratch = unsafe { &mut *thread_scratch[thread_idx].get() };
+                        // Scratch is reused within the same accumulator across all rows
                         let pivot_col = gplu_ret.gplu_row_virtual(
                             &self.u.values[start..end],
                             &self.u.col_idcs[start..end],
                             &mut mat,
-                            scratch);
+                            &mut scratch,
+                        );
                         //register the pivot
                         pivots.push((pivot_col.unwrap(), mat.nrows - 1));
-                        (mat, pivots)
-                    }
-                ).collect();
+                        (mat, pivots, scratch)
+                    },
+                )
+                .map(|(mat, pivots, scratch)| {
+                    scratch_pool.lock().unwrap().push(scratch);
+                    (mat, pivots)
+                })
+                .collect();
 
             //move into gplu_ret (serial)
 
             //count number of new entries and pre-allocate
-            let mut n_new_entries : usize = 0;
+            let mut n_new_entries: usize = 0;
             for (mat, _pivots) in &results {
                 n_new_entries += mat.nvalues();
             }
@@ -2215,10 +2220,9 @@ where
                 gplu_ret.u.append(mat);
                 for pivot in pivots {
                     debug_assert!(gplu_ret.pivots[pivot.0 as usize].is_none());
-	                gplu_ret.pivots[pivot.0 as usize] = Some(pivot.1 + n_rows_before);
+                    gplu_ret.pivots[pivot.0 as usize] = Some(pivot.1 + n_rows_before);
                 }
             }
-            
         }
 
         *self = gplu_ret;
@@ -2457,7 +2461,7 @@ mod tests {
         let res = mat.solve(b);
         let res2 = mat2.solve_parallel(b2);
 
-		//check serial vs. parallel result
+        //check serial vs. parallel result
         assert_eq!(res, res2);
 
         match res {
@@ -2477,7 +2481,7 @@ mod tests {
 
         let det1 = mat.det();
         let det2 = mat2.det();
-        
+
         assert_eq!(det1.unwrap(), det2.unwrap());
     }
 
