@@ -4477,12 +4477,21 @@ impl<'py> FromPyObject<'_, 'py> for PythonMultiPrecisionFloat {
                 .extract::<PyBackedStr>()?;
 
             // get the number of accurate digits
-            let digits = a
+            let mut digits = a
                 .chars()
                 .skip_while(|x| *x == '.' || *x == '0' || *x == '-')
                 .filter(|x| *x != '.')
                 .take_while(|x| x.is_ascii_digit())
                 .count();
+
+            // the input is 0, determine accuracy
+            if digits == 0 {
+                digits = a
+                    .chars()
+                    .filter(|x| *x != '.' && *x != '-')
+                    .take_while(|x| x.is_ascii_digit())
+                    .count()
+            }
 
             Ok(Float::parse(
                 &a,
