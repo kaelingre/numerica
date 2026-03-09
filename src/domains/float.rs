@@ -4418,14 +4418,7 @@ pub struct Decimal;
 #[cfg(feature = "python_stubgen")]
 impl PyStubType for Decimal {
     fn type_output() -> TypeInfo {
-        TypeInfo {
-            name: "decimal.Decimal".to_string(),
-            import: {
-                let mut h = std::collections::HashSet::default();
-                h.insert("decimal".into());
-                h
-            },
-        }
+        TypeInfo::with_module("decimal.Decimal", "decimal".into())
     }
 }
 
