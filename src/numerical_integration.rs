@@ -40,7 +40,6 @@
 //! ```
 
 use rand::{Rng, RngCore, SeedableRng};
-use rand_xoshiro::Xoshiro256StarStar;
 
 use crate::domains::float::{Constructible, Real, RealLike};
 
@@ -1457,43 +1456,168 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> ContinuousDimension
 ///
 /// Each thread or instance generating samples should use the same `seed` but a different `stream_id`,
 /// which is an instance counter starting at 0.
+///
+/// Adapted from [rand_xoshiro](https://crates.io/crates/rand_xoshiro)'s `Xoshiro256StarStar`.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MonteCarloRng {
-    state: Xoshiro256StarStar,
+    state: [u64; 4],
+}
+
+impl SeedableRng for MonteCarloRng {
+    type Seed = [u8; 32];
+
+    /// Create a new random number generator.  If `seed` is entirely 0, it will be
+    /// mapped to a different seed.
+    #[inline]
+    fn from_seed(seed: [u8; 32]) -> MonteCarloRng {
+        if seed.iter().all(|&x| x == 0) {
+            return Self::new(0, 0);
+        }
+
+        let mut state = [0; 4];
+        for (word, chunk) in state.iter_mut().zip(seed.chunks_exact(8)) {
+            *word = u64::from_le_bytes(chunk.try_into().unwrap());
+        }
+
+        MonteCarloRng { state }
+    }
+
+    fn seed_from_u64(seed: u64) -> MonteCarloRng {
+        Self::new(seed, 0)
+    }
 }
 
 impl RngCore for MonteCarloRng {
     #[inline]
     fn next_u32(&mut self) -> u32 {
-        self.state.next_u32()
+        (self.next_u64() >> 32) as u32
     }
 
     #[inline]
     fn next_u64(&mut self) -> u64 {
-        self.state.next_u64()
+        let result = self.state[1].wrapping_mul(5).rotate_left(7).wrapping_mul(9);
+        let t = self.state[1] << 17;
+
+        self.state[2] ^= self.state[0];
+        self.state[3] ^= self.state[1];
+        self.state[1] ^= self.state[2];
+        self.state[0] ^= self.state[3];
+        self.state[2] ^= t;
+        self.state[3] = self.state[3].rotate_left(45);
+
+        result
     }
 
     #[inline]
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        self.state.fill_bytes(dest)
+        let mut filled = 0;
+        while filled + 8 <= dest.len() {
+            dest[filled..filled + 8].copy_from_slice(&self.next_u64().to_le_bytes());
+            filled += 8;
+        }
+
+        if filled < dest.len() {
+            let tail = self.next_u64().to_le_bytes();
+            let remaining = dest.len() - filled;
+            dest[filled..].copy_from_slice(&tail[..remaining]);
+        }
     }
 }
 
 impl MonteCarloRng {
+    const SPLITMIX64_GAMMA: u64 = 0x9e3779b97f4a7c15;
+    const JUMP: [u64; 4] = [
+        0x180ec6d33cfd0aba,
+        0xd5a61266f0c9392c,
+        0xa9582618e03fc9aa,
+        0x39abdc4529b1661c,
+    ];
+    const LONG_JUMP: [u64; 4] = [
+        0x76e15d3efefdcbbf,
+        0xc5004e441c522fb3,
+        0x77710069854ee241,
+        0x39109bb02acbe635,
+    ];
+
+    #[inline]
+    fn splitmix64_next(seed: &mut u64) -> u64 {
+        *seed = seed.wrapping_add(Self::SPLITMIX64_GAMMA);
+        let mut z = *seed;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+        z ^ (z >> 31)
+    }
+
     /// Create a new random number generator with a given `seed` and `stream_id`. For parallel runs,
     /// each thread or instance generating samples should use the same `seed` but a different `stream_id`.
-    pub fn new(seed: u64, stream_id: usize) -> Self {
-        let mut state = Xoshiro256StarStar::seed_from_u64(seed);
+    pub fn new(mut seed: u64, stream_id: usize) -> Self {
+        let mut state = Self {
+            state: [
+                Self::splitmix64_next(&mut seed),
+                Self::splitmix64_next(&mut seed),
+                Self::splitmix64_next(&mut seed),
+                Self::splitmix64_next(&mut seed),
+            ],
+        };
         for _ in 0..stream_id {
             state.jump();
         }
 
-        Self { state }
+        state
+    }
+
+    /// Export the RNG state in a byte-stable format.
+    pub fn export(&self) -> [u8; 32] {
+        let mut bytes = [0; 32];
+        for (chunk, word) in bytes.chunks_exact_mut(8).zip(self.state) {
+            chunk.copy_from_slice(&word.to_le_bytes());
+        }
+
+        bytes
+    }
+
+    /// Restore an RNG from bytes produced by [`Self::export`].
+    pub fn import(state: [u8; 32]) -> Self {
+        Self::from_seed(state)
+    }
+
+    /// Jump forward, equivalently to `2^128` calls to [`Self::next_u64`].
+    pub fn jump(&mut self) {
+        self.apply_jump(Self::JUMP);
+    }
+
+    /// Jump forward, equivalently to `2^192` calls to [`Self::next_u64`].
+    pub fn long_jump(&mut self) {
+        self.apply_jump(Self::LONG_JUMP);
+    }
+
+    fn apply_jump(&mut self, jump: [u64; 4]) {
+        let mut next_state = [0; 4];
+        for word in jump {
+            for bit in 0..64 {
+                if (word & (1_u64 << bit)) != 0 {
+                    next_state[0] ^= self.state[0];
+                    next_state[1] ^= self.state[1];
+                    next_state[2] ^= self.state[2];
+                    next_state[3] ^= self.state[3];
+                }
+                self.next_u64();
+            }
+        }
+
+        self.state = next_state;
     }
 }
 
 #[cfg(test)]
 mod test {
     use std::f64::consts::PI;
+
+    use rand::RngCore;
+    use rand::SeedableRng;
+    use rand_xoshiro::Xoshiro256StarStar;
 
     use super::{ContinuousGrid, DiscreteGrid, Grid, MonteCarloRng, Probe, Sample};
 
@@ -1627,6 +1751,62 @@ mod test {
                 (sample_weight - probe_weight).abs() < 1e-12,
                 "left={sample_weight}, right={probe_weight}"
             );
+        }
+    }
+
+    #[test]
+    fn rng_export_roundtrip() {
+        let mut rng = MonteCarloRng::new(1234, 7);
+        let _ = rng.next_u64();
+        let _ = rng.next_u64();
+
+        let exported = rng.export();
+        let mut restored = MonteCarloRng::import(exported);
+
+        assert_eq!(rng.next_u64(), restored.next_u64());
+        assert_eq!(rng.next_u64(), restored.next_u64());
+        assert_eq!(rng.next_u64(), restored.next_u64());
+    }
+
+    #[test]
+    fn xoshiro_compare() {
+        let seed_u64 = 1234;
+        let seed_bytes = [
+            1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0,
+            0, 0, 0,
+        ];
+
+        let mut local = MonteCarloRng::seed_from_u64(seed_u64);
+        let mut upstream = Xoshiro256StarStar::seed_from_u64(seed_u64);
+        for _ in 0..32 {
+            assert_eq!(local.next_u64(), upstream.next_u64());
+            assert_eq!(local.next_u32(), upstream.next_u32());
+        }
+
+        let mut local = MonteCarloRng::from_seed(seed_bytes);
+        let mut upstream = Xoshiro256StarStar::from_seed(seed_bytes);
+        for _ in 0..32 {
+            assert_eq!(local.next_u64(), upstream.next_u64());
+        }
+
+        let mut local = MonteCarloRng::from_seed([0; 32]);
+        let mut upstream = Xoshiro256StarStar::from_seed([0; 32]);
+        for _ in 0..32 {
+            assert_eq!(local.next_u64(), upstream.next_u64());
+        }
+
+        let mut local = MonteCarloRng::seed_from_u64(seed_u64);
+        let mut upstream = Xoshiro256StarStar::seed_from_u64(seed_u64);
+        local.jump();
+        upstream.jump();
+        for _ in 0..32 {
+            assert_eq!(local.next_u64(), upstream.next_u64());
+        }
+
+        local.long_jump();
+        upstream.long_jump();
+        for _ in 0..32 {
+            assert_eq!(local.next_u64(), upstream.next_u64());
         }
     }
 }
