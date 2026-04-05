@@ -570,6 +570,9 @@ pub trait FloatLike:
     + MulAssign<Self>
     + DivAssign<Self>
 {
+    /// Set this value from another value. May reuse memory.
+    fn set_from(&mut self, other: &Self);
+
     /// Perform `(self * a) + b`.
     fn mul_add(&self, a: &Self, b: &Self) -> Self;
     fn neg(&self) -> Self;
@@ -660,6 +663,11 @@ pub trait Real: FloatLike {
 }
 
 impl FloatLike for f64 {
+    #[inline(always)]
+    fn set_from(&mut self, other: &Self) {
+        *self = *other;
+    }
+
     #[inline(always)]
     fn mul_add(&self, a: &Self, b: &Self) -> Self {
         f64::mul_add(*self, *a, *b)
@@ -939,6 +947,11 @@ impl F64 {
 }
 
 impl FloatLike for F64 {
+    #[inline(always)]
+    fn set_from(&mut self, other: &Self) {
+        *self = *other;
+    }
+
     #[inline(always)]
     fn mul_add(&self, a: &Self, b: &Self) -> Self {
         self.0.mul_add(a.0, b.0).into()
@@ -1380,7 +1393,9 @@ impl Hash for F64 {
 
 /// A 106-bit precision floating point number represented by the compensated sum of two `f64` values.
 ///
-/// This float has much faster arithmetic operations than `f128` (>3x) and a 106-bit precision `Float` if it needs to allocate.
+/// This float has much faster arithmetic operations than `f128` (>3x) and a 106-bit precision `Float`.
+/// Make sure to compile with AVX2 on X64 architectures to make use of
+/// faster fused multiply-addition.
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone)]
 pub struct DoubleFloat(Df64);
@@ -1462,6 +1477,11 @@ impl DoubleFloat {
 }
 
 impl FloatLike for DoubleFloat {
+    #[inline(always)]
+    fn set_from(&mut self, other: &Self) {
+        *self = *other;
+    }
+
     #[inline(always)]
     fn mul_add(&self, a: &Self, b: &Self) -> Self {
         (self.0 * a.0 + b.0).into()
@@ -2632,6 +2652,11 @@ impl From<MultiPrecisionFloat> for Float {
 
 impl FloatLike for Float {
     #[inline(always)]
+    fn set_from(&mut self, other: &Self) {
+        self.0.clone_from(&other.0);
+    }
+
+    #[inline(always)]
     fn mul_add(&self, a: &Self, b: &Self) -> Self {
         self.clone() * a + b
     }
@@ -3321,6 +3346,11 @@ impl<T: FloatLike + PartialOrd> PartialOrd for ErrorPropagatingFloat<T> {
 }
 
 impl<T: RealLike> FloatLike for ErrorPropagatingFloat<T> {
+    fn set_from(&mut self, other: &Self) {
+        self.value.set_from(&other.value);
+        self.abs_err = other.abs_err;
+    }
+
     fn mul_add(&self, a: &Self, b: &Self) -> Self {
         self.clone() * a + b
     }
@@ -3711,6 +3741,11 @@ macro_rules! simd_impl {
     ($t:ty, $p:ident) => {
         impl FloatLike for $t {
             #[inline(always)]
+            fn set_from(&mut self, other: &Self) {
+                *self = *other;
+            }
+
+            #[inline(always)]
             fn mul_add(&self, a: &Self, b: &Self) -> Self {
                 *self * *a + b
             }
@@ -3927,6 +3962,10 @@ impl LowerExp for Rational {
 }
 
 impl FloatLike for Rational {
+    fn set_from(&mut self, other: &Self) {
+        *self = other.clone();
+    }
+
     fn mul_add(&self, a: &Self, b: &Self) -> Self {
         self * a + b
     }
@@ -4688,6 +4727,12 @@ impl<T: SingleFloat> SingleFloat for Complex<T> {
 }
 
 impl<T: FloatLike> FloatLike for Complex<T> {
+    #[inline]
+    fn set_from(&mut self, other: &Self) {
+        self.re.set_from(&other.re);
+        self.im.set_from(&other.im);
+    }
+
     #[inline]
     fn mul_add(&self, a: &Self, b: &Self) -> Self {
         self.clone() * a + b
