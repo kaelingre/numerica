@@ -5287,6 +5287,16 @@ impl<'py> FromPyObject<'_, 'py> for Complex<Float> {
 #[cfg(feature = "python_stubgen")]
 impl_stub_type!(Complex<Float> = Complex64);
 
+impl Complex<Float> {
+    pub fn to_f64(&self) -> Complex<f64> {
+        Complex::new(self.re.to_f64(), self.im.to_f64())
+    }
+
+    pub fn to_double_float(&self) -> Complex<DoubleFloat> {
+        Complex::new(self.re.to_double_float(), self.im.to_double_float())
+    }
+}
+
 #[cfg(test)]
 mod test {
     use rug::Complete;
