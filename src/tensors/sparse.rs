@@ -201,6 +201,32 @@ pub enum SparseMatrixError<F: Ring> {
     Singular,
 }
 
+impl<F: Ring> std::error::Error for SparseMatrixError<F> {}
+
+impl<F: Ring> std::fmt::Display for SparseMatrixError<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SparseMatrixError::ShapeMismatch => {
+                write!(f, "The shape of the matrix is not compatible")
+            }
+            SparseMatrixError::FieldMismatch => write!(f, "The fields of the arguments differ"),
+            SparseMatrixError::Inconsistent => write!(f, "The system is inconsistent"),
+            SparseMatrixError::NotSquare => write!(f, "The matrix is not square"),
+            SparseMatrixError::Underdetermined {
+                rank,
+                row_reduced_augmented_matrix,
+            } => {
+                writeln!(f, "The system is underdetermined with rank {rank}")?;
+                writeln!(
+                    f,
+                    "\nRow reduced augmented matrix:\n{row_reduced_augmented_matrix}"
+                )
+            }
+            SparseMatrixError::Singular => write!(f, "The matrix is singular"),
+        }
+    }
+}
+
 /// A sparse matrix in compressed sparse row (CSR) format.
 ///
 /// We keep each row sorted at all times.
