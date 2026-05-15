@@ -6,7 +6,7 @@ use std::{
 
 use rand::Rng;
 
-use super::{Constructible, FloatLike, Real, RealLike, SingleFloat};
+use super::{Constructible, FixedPrecision, FloatLike, Real, RealLike, SingleFloat};
 use crate::domains::{InternalOrdering, integer::Integer, rational::Rational};
 
 impl FloatLike for f64 {
@@ -265,6 +265,10 @@ impl Real for f64 {
     fn powf(&self, e: &f64) -> Self {
         (*self).powf(*e)
     }
+}
+
+impl FixedPrecision for f64 {
+    const BINARY_PRECISION: usize = 53;
 }
 
 impl From<&Rational> for f64 {
@@ -681,6 +685,10 @@ impl Real for F64 {
     fn powf(&self, e: &Self) -> Self {
         self.0.powf(e.0).into()
     }
+}
+
+impl FixedPrecision for F64 {
+    const BINARY_PRECISION: usize = 53;
 }
 
 impl From<f64> for F64 {

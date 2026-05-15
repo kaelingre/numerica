@@ -112,6 +112,17 @@ pub trait Constructible: FloatLike {
     fn new_sample_unit<R: Rng + ?Sized>(rng: &mut R) -> Self;
 }
 
+/// A float that has a fixed finite precision, such as `f64` (excluding multi-precision floats).
+pub trait FixedPrecision {
+    /// The number of binary digits in the mantissa.
+    const BINARY_PRECISION: usize;
+    /// The (rounded) number of decimal digits in the mantissa.
+    const DECIMAL_PRECISION: usize = Self::BINARY_PRECISION
+        .saturating_mul(30103)
+        .saturating_add(99999)
+        / 100000;
+}
+
 /// A number that behaves like a real number, with constants like π and e
 /// and functions like sine and cosine.
 ///
