@@ -199,6 +199,25 @@ pub enum IntegerRelationError {
     CoefficientLimit,
 }
 
+impl std::error::Error for IntegerRelationError {}
+
+impl std::fmt::Display for IntegerRelationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IntegerRelationError::PrecisionLimit => {
+                f.write_str("precision limit reached during integer relation reconstruction")
+            }
+            IntegerRelationError::IterationLimit(relation) => write!(
+                f,
+                "iteration limit reached during integer relation reconstruction: {relation:?}"
+            ),
+            IntegerRelationError::CoefficientLimit => {
+                f.write_str("coefficient limit reached during integer relation reconstruction")
+            }
+        }
+    }
+}
+
 macro_rules! from_with_i64_cast {
     ($base: ty) => {
         impl From<$base> for Integer {
