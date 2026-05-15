@@ -5,7 +5,7 @@ use std::{
 
 use rand::Rng;
 
-use super::{FloatLike, Real, RealLike, SingleFloat};
+use super::{FixedPrecision, FloatLike, Real, RealLike, SingleFloat};
 use crate::domains::{integer::Integer, rational::Rational};
 
 /// A float that does linear error propagation.
@@ -795,4 +795,9 @@ impl<T: Real + RealLike> Real for ErrorPropagatingFloat<T> {
         }
         .truncate()
     }
+}
+
+impl<T: FloatLike + FixedPrecision> FixedPrecision for ErrorPropagatingFloat<T> {
+    const BINARY_PRECISION: usize = T::BINARY_PRECISION;
+    const DECIMAL_PRECISION: usize = T::DECIMAL_PRECISION;
 }

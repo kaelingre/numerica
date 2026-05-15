@@ -10,7 +10,7 @@ use rug::Float as MultiPrecisionFloat;
 use simba::scalar::{ComplexField, RealField};
 use xprec::{CompensatedArithmetic, Df64};
 
-use super::{Constructible, FloatLike, Real, RealLike, SingleFloat};
+use super::{Constructible, FixedPrecision, FloatLike, Real, RealLike, SingleFloat};
 use crate::domains::{InternalOrdering, integer::Integer, rational::Rational};
 
 /// A 106-bit precision floating point number represented by the compensated sum of two `f64` values.
@@ -618,6 +618,10 @@ impl Real for DoubleFloat {
 
         self.0.powf(e.0).into()
     }
+}
+
+impl FixedPrecision for DoubleFloat {
+    const BINARY_PRECISION: usize = 106;
 }
 
 impl From<f64> for DoubleFloat {
