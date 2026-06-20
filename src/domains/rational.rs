@@ -1145,11 +1145,11 @@ impl Rational {
             let Some(p) = primes.next() else {
                 return Err("Ran out of primes for rational reconstruction");
             };
-            let Some(p) = u32::try_from_integer(p.into()) else {
+            if p > u32::MAX as u64 {
                 return Err("Ran out of primes for rational reconstruction");
-            };
+            }
 
-            let field = FiniteField::<u32>::new(p);
+            let field = FiniteField::<u32>::new(p as u32);
             prime_sample_point.clear();
             for x in sample {
                 prime_sample_point.push(x.to_finite_field(&field));

@@ -97,6 +97,7 @@ pub trait FiniteFieldWorkspace: Clone + Display + Eq + Hash {
     /// this number in `Self`.
     fn get_large_prime() -> Self;
 
+    #[deprecated(since = "2.1.0", note = "Use `FiniteFieldCore` methods instead")]
     fn try_from_integer(n: Integer) -> Option<Self>;
 
     fn to_integer(&self) -> Integer;
@@ -1436,6 +1437,12 @@ impl Default for Mersenne32 {
     }
 }
 
+impl From<u32> for Mersenne32 {
+    fn from(n: u32) -> Self {
+        Mersenne32(n)
+    }
+}
+
 impl Mersenne32 {
     pub fn new() -> Self {
         Mersenne32(Self::PRIME)
@@ -1468,13 +1475,6 @@ impl FiniteFieldWorkspace for Mersenne32 {
                 Integer::Single(s) => {
                     if s >= 0 {
                         Some(Mersenne32(s as u32))
-                    } else {
-                        None
-                    }
-                }
-                Integer::Double(d) => {
-                    if d >= 0 {
-                        Some(Mersenne32(d as u32))
                     } else {
                         None
                     }
@@ -1731,9 +1731,7 @@ impl Ring for FiniteField<Mersenne32> {
     }
 
     fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        let r = rng.random_range(
-            range.0.max(0)..range.1.min(Mersenne32::PRIME as i64),
-        );
+        let r = rng.random_range(range.0.max(0)..range.1.min(Mersenne32::PRIME as i64));
         r as u32
     }
 
@@ -1785,16 +1783,15 @@ impl Field for FiniteField<Mersenne32> {
         assert!(*a != 0, "0 is not invertible");
 
         // extended Euclidean algorithm: a x + b p = gcd(x, p) = 1 or a x = 1 (mod p)
-        //work with u64 since q*v1 in the loop might overflow otherwise
-        let mut u1: u64 = 1;
-        let mut u3 = *a as u64;
-        let mut v1: u64 = 0;
-        let mut v3 = Mersenne32::PRIME as u64;
+        let mut u1 = 1;
+        let mut u3 = *a;
+        let mut v1 = 0;
+        let mut v3 = Mersenne32::PRIME;
         let mut even_iter: bool = true;
 
         while v3 != 0 {
             let q = u3 / v3;
-            let t3 = u3 % v3;
+            let t3 = u3 - q * v3;
             let t1 = u1 + q * v1;
             u1 = v1;
             v1 = t1;
@@ -1822,6 +1819,12 @@ pub struct Mersenne64(u64);
 impl Default for Mersenne64 {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl From<u64> for Mersenne64 {
+    fn from(n: u64) -> Self {
+        Mersenne64(n)
     }
 }
 
@@ -1857,13 +1860,6 @@ impl FiniteFieldWorkspace for Mersenne64 {
                 Integer::Single(s) => {
                     if s >= 0 {
                         Some(Mersenne64(s as u64))
-                    } else {
-                        None
-                    }
-                }
-                Integer::Double(d) => {
-                    if d >= 0 && d <= Self::PRIME as i128 {
-                        Some(Mersenne64(d as u64))
                     } else {
                         None
                     }
@@ -2181,7 +2177,7 @@ impl Field for FiniteField<Mersenne64> {
 
         while v3 != 0 {
             let q = u3 / v3;
-            let t3 = u3 % v3;
+            let t3 = u3 - q * v3;
             let t1 = u1 + q * v1;
             u1 = v1;
             v1 = t1;
