@@ -97,7 +97,8 @@ pub trait FiniteFieldWorkspace: Clone + Display + Eq + Hash {
     /// this number in `Self`.
     fn get_large_prime() -> Self;
 
-    #[deprecated(since = "2.1.0", note = "Use `FiniteFieldCore` methods instead")]
+    /// Try to convert an integer to a finite field workspace number type.
+    /// Returns `None` if the integer is negative or too large.
     fn try_from_integer(n: Integer) -> Option<Self>;
 
     fn to_integer(&self) -> Integer;
@@ -1470,19 +1471,15 @@ impl FiniteFieldWorkspace for Mersenne32 {
     }
 
     fn try_from_integer(n: Integer) -> Option<Self> {
-        if n <= Self::PRIME {
-            match n {
-                Integer::Single(s) => {
-                    if s >= 0 {
-                        Some(Mersenne32(s as u32))
-                    } else {
-                        None
-                    }
+        match n {
+            Integer::Single(s) => {
+                if s >= 0 && s <= Self::PRIME as i64 {
+                    Some(Mersenne32(s as u32))
+                } else {
+                    None
                 }
-                _ => None,
             }
-        } else {
-            None
+            _ => None,
         }
     }
 
@@ -1855,19 +1852,15 @@ impl FiniteFieldWorkspace for Mersenne64 {
     }
 
     fn try_from_integer(n: Integer) -> Option<Self> {
-        if n <= Self::PRIME {
-            match n {
-                Integer::Single(s) => {
-                    if s >= 0 {
-                        Some(Mersenne64(s as u64))
-                    } else {
-                        None
-                    }
+        match n {
+            Integer::Single(s) => {
+                if s >= 0 && s <= Self::PRIME as i64 {
+                    Some(Mersenne64(s as u64))
+                } else {
+                    None
                 }
-                _ => None,
             }
-        } else {
-            None
+            _ => None,
         }
     }
 
