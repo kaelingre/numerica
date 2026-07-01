@@ -1023,6 +1023,24 @@ impl<F: Ring> Matrix<F> {
         Ok((m1, m2))
     }
 
+    /// Appends a row to the matrix.
+    ///
+    /// The number of columns of the matrix and the length of the vector need to agree.
+    pub fn append_row(&mut self, row: Vector<F>) {
+        assert_eq!(self.ncols as usize, row.len());
+        self.nrows += 1;
+        self.data.extend(row.data);
+    }
+
+    /// Concatenates two matrices, i.e. appends the rows of the `other` matrix to `self`.
+    ///
+    /// The number of columns of the two matrices need to agree.
+    pub fn concatenate(&mut self, other: Matrix<F>) {
+        assert_eq!(self.ncols, other.ncols);
+        self.nrows += other.nrows;
+        self.data.extend(other.data);
+    }
+
     /// Compute the determinant of the matrix.
     pub fn det(&self) -> Result<F::Element, MatrixError<F>> {
         if self.nrows != self.ncols {
