@@ -922,6 +922,12 @@ impl<F: Ring> Matrix<F> {
         self.data.iter()
     }
 
+    /// Return a row-first iterator over the mutable entries of the matrix.
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, F::Element> {
+        self.data.iter_mut()
+    }
+    
+
     /// Apply a function `f` to each entry of the matrix.
     pub fn map<G: Ring>(&self, f: impl Fn(&F::Element) -> G::Element, field: G) -> Matrix<G> {
         Matrix {
